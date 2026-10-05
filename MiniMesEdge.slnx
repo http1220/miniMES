@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Collector/Collector.csproj" />
+    <Project Path="src/Core/Core.csproj" />
+    <Project Path="src/Dashboard/Dashboard.csproj" />
+    <Project Path="src/Data/Data.csproj" />
+    <Project Path="src/Modbus/Modbus.csproj" />
+    <Project Path="src/Server/Server.csproj" />
+    <Project Path="src/Simulator/Simulator.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/IntegrationTests/IntegrationTests.csproj" />
+    <Project Path="test/UnitTests/UnitTests.csproj" />
+  </Folder>
+</Solution>
