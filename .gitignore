@@ -4,7 +4,6 @@ node_modules/
 __pycache__/
 *.pyc
 /.vs
-/docs/adr
 /src/Collector/bin/Debug/net48
 /src/Collector/obj
 /src/Core/bin/Debug/net48
