@@ -1,0 +1,23 @@
+name: Checkout miniMES
+
+on:
+    push:
+        branches:
+            - main
+    pull_request:
+        branches:
+            - main
+    workflow_dispatch:
+    
+jobs:
+    build:
+        runs-on: windows-latest
+           
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-dotnet@v6
+              with:
+                  dotnet-version: '8.0.x'
+                  
+            - run: dotnet build MiniMesEdge.slnx
+            - run: dotnet test test/UnitTests/UnitTests.csproj
