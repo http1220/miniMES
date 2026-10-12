@@ -9,7 +9,7 @@ namespace Modbus
         {
             if(frame.Length < 9)
             {
-                throw new ArgumentException("지원하지 않는 함수코드입니다.", nameof(frame));
+                throw new ArgumentException("응답 프레임은 최소 9바이트 이상이어야 합니다.", nameof(frame));
             }
 
             if(frame[7] != 0x03 && frame[7] != 0x83)
