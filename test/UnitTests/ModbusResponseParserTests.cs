@@ -1,6 +1,7 @@
 using Xunit;
 using Modbus;
 using Xunit.Sdk;
+using System;
 
 namespace UnitTests
 {
@@ -74,6 +75,59 @@ namespace UnitTests
             bool result = ModbusResponseParser.IsTransactionIdMatch(given , 0x1235);
             // Then
             Assert.False(result);
+        }
+
+        [Fact]
+        public void ParseReadHoldingRegistersResponse_UnexpectedFunctionCode_Throws()
+        {
+            // Given
+            byte[] buffer = new byte[]
+            {
+                0x00, 0x01,             // 트랜잭션 ID
+                0x00, 0x00,             // 프로토콜 ID
+                0x00, 0x07,             // 뒤에 오는 길이: 7바이트
+                0x01,                   // 유닛 ID
+                0x04,                   // 함수코드: 정상 읽기 응답
+                0x04,                   // 이 파서가 지원하지 않는 함수코드
+                0x12, 0x34, 0x56, 0x78  // 레지스터 2개의 데이터
+            };
+            // When
+            // Then
+            Assert.Throws<ArgumentException>( () => ModbusResponseParser.ParseReadHoldingRegistersResponse(buffer));
+        }
+
+        [Fact]
+        public void ParseReadHoldingRegistersResponse_TooShortFrame_Throws()
+        {
+            // Given
+            byte[] frame = new byte[8];
+            frame[7] = 0x03;
+
+            // When
+        
+            Assert.Throws<ArgumentException>( () => ModbusResponseParser.ParseReadHoldingRegistersResponse(frame));
+            // Then
+        }
+
+        [Fact]
+        public void ParseReadHoldingRegistersResponse_IncompleteData_Throws()
+        {
+            // Given
+            byte[] buffer = new byte[]
+            {
+                0x00, 0x01,       // 트랜잭션 ID
+                0x00, 0x00,       // 프로토콜 ID
+                0x00, 0x07,       // 뒤에 7바이트가 와야 한다고 선언
+                0x01,             // 유닛 ID
+                0x03,             // 함수코드
+                0x04,             // 데이터는 4바이트라고 선언
+                0x12, 0x34, 0x56  // 실제 데이터는 3바이트만 있음
+            };
+            // When
+            ArgumentException ex = Assert.Throws<ArgumentException>( () => ModbusResponseParser.ParseReadHoldingRegistersResponse(buffer));
+        
+            // Then
+            Assert.Equal("frame" , ex.ParamName);
         }
     }
 }

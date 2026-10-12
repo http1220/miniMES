@@ -7,12 +7,28 @@ namespace Modbus
     {
         public static ModbusReadResponse ParseReadHoldingRegistersResponse(byte[] frame)
         {
+            if(frame.Length < 9)
+            {
+                throw new ArgumentException("지원하지 않는 함수코드입니다.", nameof(frame));
+            }
+
+            if(frame[7] != 0x03 && frame[7] != 0x83)
+            {
+                throw new ArgumentException("지원하지 않는 함수코드입니다.", nameof(frame));
+            }
+
             if((frame[7] & 0x80) != 0)
             {
                 return new ModbusReadResponse(null , frame[8]);
             }
 
             byte length = frame[8];
+
+            if(frame.Length < 9 + length)
+            {
+                throw new ArgumentException("선언된 데이터 길이보다 프레임이 짧습니다.", nameof(frame));
+            }
+
             byte[] buffer = new byte[length];
             Array.Copy(frame, 9, buffer, 0, length);
             ModbusReadResponse result = new ModbusReadResponse(buffer, null);
