@@ -1,6 +1,8 @@
 using System;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
+using Core;
 
 namespace Modbus
 {
@@ -18,54 +20,127 @@ namespace Modbus
 
         }
 
-        public async Task<ModbusReadResponse> ReadHoldingRegistersAsync(byte unitId , ushort startAddress , ushort quantity)
+        public async Task<ModbusReadResult> ReadHoldingRegistersAsync(byte unitId, ushort startAddress, ushort quantity, TimeSpan timeout)
         {
+            if (timeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException();
+            }
             TcpClient tcpClient = new TcpClient();
+            Socket socket = tcpClient.Client;
+            CancellationTokenSource cancellationTokenSource = new CancellationTokenSource();
 
             using (tcpClient)
+            using (cancellationTokenSource)
             {
-                await tcpClient.ConnectAsync(_host, _port);
-
-                NetworkStream networkStream = tcpClient.GetStream();
-                ushort transactionId = 1;
-                byte[] request = ModbusRequestBuilder.BuildReadHoldingRegistersRequest(transactionId, unitId, startAddress, quantity);
-                
-                await networkStream.WriteAsync(request, 0, request.Length);
-
-
-                byte[] buffer = new byte[MaxModbusTcpFrameLength];
-                int receivedCount = 0;
-                int? frameLength;
-                while(true)
+                CancellationTokenRegistration registration = cancellationTokenSource.Token.Register(tcpClient.Close);
+                using (registration)
                 {
-                    if(buffer.Length - receivedCount == 0) throw new InvalidOperationException();
-                    int bytesRead = await networkStream.ReadAsync(buffer, receivedCount, buffer.Length - receivedCount);
-                    if(bytesRead == 0) throw new System.IO.EndOfStreamException();
-                    receivedCount += bytesRead;
-                    byte[] result = new byte[receivedCount];
-                    Array.Copy(buffer , result , receivedCount);
-                    frameLength = ModbusFrameBoundary.GetCompleteFrameLength(result);
-                    if(frameLength.HasValue) break;
+                    cancellationTokenSource.CancelAfter(timeout);
+                    try
+                    {
+                        await socket.ConnectAsync(_host, _port);
+                    }
+                    catch (SocketException)
+                    {
+                        if (cancellationTokenSource.IsCancellationRequested) { return new ModbusReadResult(null, ModbusFailureType.Timeout, null); }
+                        return new ModbusReadResult(null, ModbusFailureType.ConnectionFailed, null);
+                    }
+                    catch (ObjectDisposedException) when (cancellationTokenSource.IsCancellationRequested)
+                    {
+                        return new ModbusReadResult(null, ModbusFailureType.Timeout, null);
+
+                    }
+
+
+                    try
+                    {
+                        NetworkStream networkStream = tcpClient.GetStream();
+
+                        ushort transactionId = 1;
+                        byte[] request = ModbusRequestBuilder.BuildReadHoldingRegistersRequest(transactionId, unitId, startAddress, quantity);
+
+                        await networkStream.WriteAsync(request, 0, request.Length);
+
+
+                        byte[] buffer = new byte[MaxModbusTcpFrameLength];
+                        int receivedCount = 0;
+                        while (true)
+                        {
+                            if (cancellationTokenSource.IsCancellationRequested) { return new ModbusReadResult(null, ModbusFailureType.Timeout, null); }
+
+                            // 새로 읽기 전에 이미 받은 데이터에서 완성된 프레임을 처리합니다.
+                            if (receivedCount >= 6)
+                            {
+                                int length = (buffer[4] << 8) | buffer[5];
+                                int fullLength = length + 6;
+                                if (fullLength < 9 || fullLength > MaxModbusTcpFrameLength)
+                                {
+                                    return new ModbusReadResult(null, ModbusFailureType.ConnectionLost, null);
+                                }
+
+                                byte[] result = new byte[receivedCount];
+                                Array.Copy(buffer, result, receivedCount);
+                                int? frameLength = ModbusFrameBoundary.GetCompleteFrameLength(result);
+                                if (frameLength.HasValue)
+                                {
+                                    byte[] frame = new byte[frameLength.Value];
+                                    Array.Copy(buffer, frame, frame.Length);
+
+                                    if (!ModbusResponseParser.IsTransactionIdMatch(frame, transactionId))
+                                    {
+                                        System.Diagnostics.Trace.TraceWarning(
+                                            "Modbus TCP 응답 폐기: Transaction ID 기대값={0}, 수신값={1}.",
+                                            transactionId, (frame[0] << 8) | frame[1]);
+
+                                        // 폐기한 프레임 뒤에 함께 도착한 다음 프레임·부분 프레임을 보존합니다.
+                                        int remainingCount = receivedCount - frame.Length;
+                                        Array.Copy(buffer, frame.Length, buffer, 0, remainingCount);
+                                        receivedCount = remainingCount;
+                                        continue;
+                                    }
+
+                                    if (frame[7] == 0x03 && frame.Length == 9 + frame[8] && frame[8] == quantity * 2) { }
+                                    else if (frame[7] == 0x83 && frame.Length == 9) { }
+                                    else
+                                    {
+                                        return new ModbusReadResult(null, ModbusFailureType.ConnectionLost, null);
+                                    }
+
+                                    ModbusReadResponse response = ModbusResponseParser.ParseReadHoldingRegistersResponse(frame);
+                                    if (cancellationTokenSource.IsCancellationRequested) { return new ModbusReadResult(null, ModbusFailureType.Timeout, null); }
+                                    if (response.ExceptionCode.HasValue)
+                                    {
+                                        return new ModbusReadResult(null, ModbusFailureType.DeviceException, response.ExceptionCode);
+                                    }
+
+                                    return new ModbusReadResult(response.Data, null, null);
+                                }
+                            }
+
+                            if (buffer.Length - receivedCount == 0) return new ModbusReadResult(null, ModbusFailureType.ConnectionLost, null);
+                            int bytesRead = await networkStream.ReadAsync(buffer, receivedCount, buffer.Length - receivedCount);
+                            if (bytesRead == 0) throw new System.IO.EndOfStreamException();
+                            receivedCount += bytesRead;
+                        }
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        if (cancellationTokenSource.IsCancellationRequested) { return new ModbusReadResult(null, ModbusFailureType.Timeout, null); }
+                        return new ModbusReadResult(null, ModbusFailureType.ConnectionLost, null);
+                    }
+                    catch (SocketException)
+                    {
+                        if (cancellationTokenSource.IsCancellationRequested) { return new ModbusReadResult(null, ModbusFailureType.Timeout, null); }
+                        return new ModbusReadResult(null, ModbusFailureType.ConnectionLost, null);
+                    }
+                    catch (ObjectDisposedException) when (cancellationTokenSource.IsCancellationRequested)
+                    {
+                        return new ModbusReadResult(null, ModbusFailureType.Timeout, null);
+
+                    }
                 }
 
-                byte[] frame = new byte[frameLength.Value];
-
-                Array.Copy(buffer,frame,frameLength.Value);
-                ModbusReadResponse response = ModbusResponseParser.ParseReadHoldingRegistersResponse(frame);
-
-                bool isTransactionIdMatch = ModbusResponseParser.IsTransactionIdMatch(frame , transactionId);
-
-                if (!isTransactionIdMatch)
-                {
-                    throw new InvalidOperationException("요청과 응답의 Transaction ID가 다릅니다.");
-                }
-
-                if (response.ExceptionCode.HasValue)
-                {
-                    throw new InvalidOperationException($"장비가 Modbus 예외 응답을 반환했습니다. {response.ExceptionCode.Value}");
-                }
-
-                return response;
             }
 
         }
