@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using Data;
 using Microsoft.Data.SqlClient;
@@ -8,22 +9,31 @@ namespace IntegrationTests
 {
     public class MigrationRunnerTests
     {
-        [Fact]
-        public void Assembly_ContainsSampleMigration()
+        [Theory]
+        [InlineData("Data.Migrations.0001_CreateSample.sql", "CREATE TABLE SAMPLE")]
+        [InlineData("Data.Migrations.0002_CreateAlarm.sql", "CREATE TABLE dbo.ALARM")]
+        [InlineData("Data.Migrations.0003_CreateAlarmEvent.sql", "CREATE TABLE dbo.ALARM_EVENT")]
+        [InlineData("Data.Migrations.0004_CreateFault.sql", "CREATE TABLE dbo.FAULT (")]
+        [InlineData("Data.Migrations.0004_CreateFault.sql", "CREATE TABLE dbo.FAULT_HISTORY (")]
+        [InlineData("Data.Migrations.0005_CreateAppUser.sql", "CREATE TABLE dbo.APP_USER (")]
+        [InlineData("Data.Migrations.0006_CreateSystem.sql", "CREATE TABLE dbo.EQUIPMENT (")]
+        [InlineData("Data.Migrations.0006_CreateSystem.sql", "CREATE TABLE dbo.[SYSTEM] (")]
+        [InlineData("Data.Migrations.0006_CreateSystem.sql", "CREATE TABLE dbo.SYSTEM_NODE (")]
+        public void Assembly_ContainsMigration(string resourceName, string expectedSql)
         {
             using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
-                "Data.Migrations.0001_CreateSample.sql"))
+                resourceName))
             {
                 Assert.NotNull(stream);
                 using (var reader = new StreamReader(stream))
                 {
-                    Assert.Contains("CREATE TABLE SAMPLE", reader.ReadToEnd());
+                    Assert.Contains(expectedSql, reader.ReadToEnd());
                 }
             }
         }
 
         [Fact]
-        public void Run_CreatesSampleSchema_AndDoesNotReapplyMigration()
+        public void Run_AppliesMigrationsInOrder_AndDoesNotReapplyThem()
         {
             var connectionString = Environment.GetEnvironmentVariable("MINIMES_TEST_SQL_CONNECTION_STRING");
             Assert.False(string.IsNullOrWhiteSpace(connectionString),
@@ -49,6 +59,25 @@ namespace IntegrationTests
                     using (var database = new SqlConnection(builder.ConnectionString))
                     {
                         database.Open();
+                        AssertMigrationOrder(database);
+                        VerifySystemConstraints(database);
+                        Assert.Equal(1, Scalar(database,
+                            "SELECT COUNT(*) FROM sys.foreign_keys " +
+                            "WHERE name = 'FK_FAULT_HISTORY_APP_USER' " +
+                            "AND parent_object_id = OBJECT_ID('dbo.FAULT_HISTORY') " +
+                            "AND referenced_object_id = OBJECT_ID('dbo.APP_USER') " +
+                            "AND is_disabled = 0 AND is_not_trusted = 0"));
+                        Execute(database, "INSERT INTO dbo.APP_USER (Name) VALUES (N'Test User')");
+                        Assert.Equal(1, Scalar(database,
+                            "SELECT COUNT(*) FROM dbo.APP_USER WHERE Name = N'Test User' AND IsActive = 1"));
+                        Assert.Equal(9, Scalar(database,
+                            "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT')"));
+                        Assert.Equal(7, Scalar(database,
+                            "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT_HISTORY')"));
+                        Assert.Equal(6, Scalar(database,
+                            "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.ALARM_EVENT')"));
+                        Assert.Equal(7, Scalar(database,
+                            "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.ALARM')"));
                         Assert.Equal(8, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.SAMPLE')"));
                         Assert.Equal(1, Scalar(database,
@@ -68,9 +97,7 @@ namespace IntegrationTests
                     {
                         database.Open();
                         Assert.Equal(1, Scalar(database, "SELECT COUNT(*) FROM dbo.SAMPLE"));
-                        Assert.Equal(1, Scalar(database,
-                            "SELECT COUNT(*) FROM dbo.SchemaVersions " +
-                            "WHERE ScriptName = 'Data.Migrations.0001_CreateSample.sql'"));
+                        AssertMigrationOrder(database);
                     }
                 }
                 finally
@@ -80,6 +107,56 @@ namespace IntegrationTests
                     Execute(admin, "DROP DATABASE [" + databaseName + "]");
                 }
             }
+        }
+
+        private static void AssertMigrationOrder(SqlConnection connection)
+        {
+            var scripts = new List<string>();
+            using (var command = new SqlCommand(
+                "SELECT ScriptName FROM dbo.SchemaVersions ORDER BY Id", connection))
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    scripts.Add(reader.GetString(0));
+                }
+            }
+
+            Assert.Equal(new[]
+            {
+                "Data.Migrations.0001_CreateSample.sql",
+                "Data.Migrations.0002_CreateAlarm.sql",
+                "Data.Migrations.0003_CreateAlarmEvent.sql",
+                "Data.Migrations.0004_CreateFault.sql",
+                "Data.Migrations.0005_CreateAppUser.sql",
+                "Data.Migrations.0006_CreateSystem.sql"
+            }, scripts);
+        }
+
+        private static void VerifySystemConstraints(SqlConnection connection)
+        {
+            Execute(connection, "INSERT INTO dbo.EQUIPMENT (EquipmentId, Name) VALUES (1, N'Equipment 1'), (2, N'Equipment 2')");
+            var systemId = Scalar(connection,
+                "INSERT INTO dbo.[SYSTEM] (Name) OUTPUT INSERTED.SystemId VALUES (N'System 1')");
+            var rootId = Scalar(connection,
+                "INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder) OUTPUT INSERTED.NodeId " +
+                "VALUES (" + systemId + ", 2, 0)");
+            var insertChild = "INSERT INTO dbo.SYSTEM_NODE " +
+                "(SystemId, ParentNodeId, NodeType, EquipmentId, SortOrder) VALUES (" +
+                systemId + ", " + rootId + ", ";
+            Execute(connection, insertChild + "1, 1, 0)");
+
+            Assert.Equal(2601, Assert.Throws<SqlException>(() =>
+                Execute(connection, insertChild + "1, 1, 1)")).Number);
+            Assert.Equal(2601, Assert.Throws<SqlException>(() => Execute(connection,
+                "INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder) VALUES (" +
+                systemId + ", 3, 1)")).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() =>
+                Execute(connection, insertChild + "1, NULL, 1)")).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() =>
+                Execute(connection, insertChild + "2, 2, 1)")).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() =>
+                Execute(connection, insertChild + "4, NULL, 1)")).Number);
         }
 
         private static void Execute(SqlConnection connection, string sql)
