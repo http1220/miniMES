@@ -1,0 +1,43 @@
+CREATE TABLE dbo.EQUIPMENT (
+    EquipmentId INT NOT NULL,
+    Name        NVARCHAR(100) NOT NULL,
+
+    CONSTRAINT PK_EQUIPMENT PRIMARY KEY CLUSTERED (EquipmentId)
+);
+
+CREATE TABLE dbo.[SYSTEM] (
+    SystemId    INT IDENTITY(1,1) NOT NULL,
+    Name        NVARCHAR(100) NOT NULL,
+
+    CONSTRAINT PK_SYSTEM PRIMARY KEY CLUSTERED (SystemId)
+);
+
+CREATE TABLE dbo.SYSTEM_NODE (
+    NodeId          INT IDENTITY(1,1) NOT NULL,
+    SystemId        INT NOT NULL,
+    ParentNodeId    INT NULL,
+    NodeType        TINYINT NOT NULL,
+    EquipmentId     INT NULL,
+    SortOrder       INT NOT NULL,
+
+    CONSTRAINT PK_SYSTEM_NODE PRIMARY KEY CLUSTERED (NodeId),
+    CONSTRAINT FK_SYSTEM_NODE_SYSTEM FOREIGN KEY (SystemId)
+        REFERENCES dbo.[SYSTEM] (SystemId),
+    CONSTRAINT FK_SYSTEM_NODE_Parent FOREIGN KEY (ParentNodeId)
+        REFERENCES dbo.SYSTEM_NODE (NodeId),
+    CONSTRAINT FK_SYSTEM_NODE_EQUIPMENT FOREIGN KEY (EquipmentId)
+        REFERENCES dbo.EQUIPMENT (EquipmentId),
+    CONSTRAINT CK_SYSTEM_NODE_NodeType CHECK (NodeType IN (1, 2, 3)),
+    CONSTRAINT CK_SYSTEM_NODE_Equipment CHECK (
+        (NodeType = 1 AND EquipmentId IS NOT NULL)
+        OR (NodeType <> 1 AND EquipmentId IS NULL)
+    )
+);
+
+CREATE UNIQUE INDEX UX_SYSTEM_NODE_Equipment
+    ON dbo.SYSTEM_NODE (EquipmentId)
+    WHERE EquipmentId IS NOT NULL;
+
+CREATE UNIQUE INDEX UX_SYSTEM_NODE_Root
+    ON dbo.SYSTEM_NODE (SystemId)
+    WHERE ParentNodeId IS NULL;
