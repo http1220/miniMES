@@ -15,6 +15,37 @@ namespace Data
             this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
         }
 
+        public FaultActionTextUpdateResult UpdateActionText(int faultId, byte[] expectedVersion, string actionText)
+        {
+            if (expectedVersion == null)
+                throw new ArgumentNullException(nameof(expectedVersion));
+            if (expectedVersion.Length != 8)
+                throw new ArgumentException("A rowversion must contain exactly 8 bytes.", nameof(expectedVersion));
+
+            var newVersion = connection.QuerySingleOrDefault<byte[]>(@"
+UPDATE dbo.FAULT SET ActionText = @actionText
+OUTPUT inserted.Version
+WHERE FaultId = @faultId AND Version = @expectedVersion",
+                new { faultId, expectedVersion, actionText });
+
+            if (newVersion != null)
+                return new FaultActionTextUpdateResult(FaultActionTextUpdateStatus.Success, actionText, newVersion);
+
+            // D-115: read both values together so the caller can resolve the conflict and retry.
+            var current = connection.QuerySingleOrDefault<ActionTextRow>(
+                "SELECT ActionText, Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
+            if (current == null)
+                throw new KeyNotFoundException("The requested fault does not exist.");
+
+            return new FaultActionTextUpdateResult(FaultActionTextUpdateStatus.Conflict, current.ActionText, current.Version);
+        }
+
+        private sealed class ActionTextRow
+        {
+            public string ActionText { get; set; }
+            public byte[] Version { get; set; }
+        }
+
         public FaultTransitionResult TransitionFault(int faultId, byte expectedCurrentStatus,
             byte newStatus, int changedByUserId, DateTime nowUtc, string reason)
         {

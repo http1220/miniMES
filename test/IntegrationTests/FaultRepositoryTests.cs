@@ -112,6 +112,73 @@ OUTPUT INSERTED.FaultId VALUES (@alarmId, 1, @nowUtc, 1)", new { alarmId, nowUtc
             Assert.Equal(0, connection.QuerySingle<int>("SELECT COUNT(*) FROM dbo.FAULT_HISTORY"));
         }
 
+        [Theory]
+        [InlineData("조치: '부품 교체'; -- bound text")]
+        [InlineData(null)]
+        public void UpdateActionText_MatchingVersion_ReturnsNewVersionUsableForNextUpdate(string text)
+        {
+            var original = ReadActionText();
+            var repository = new FaultRepository(connection);
+
+            var result = repository.UpdateActionText(faultId, original.Version, text);
+
+            Assert.Equal(FaultActionTextUpdateStatus.Success, result.Status);
+            Assert.Equal(text, result.ActionText);
+            Assert.Equal(8, result.Version.Length);
+            Assert.NotEqual(original.Version, result.Version);
+            var stored = ReadActionText();
+            Assert.Equal(text, stored.ActionText);
+            Assert.Equal(result.Version, stored.Version);
+
+            var next = repository.UpdateActionText(faultId, result.Version, "next edit");
+            Assert.Equal(FaultActionTextUpdateStatus.Success, next.Status);
+            Assert.NotEqual(result.Version, next.Version);
+            Assert.Equal(next.Version, ReadActionText().Version);
+            Assert.Equal("next edit", ReadActionText().ActionText);
+        }
+
+        [Theory]
+        [InlineData("first user's text")]
+        [InlineData(null)]
+        public void UpdateActionText_StaleVersion_ReturnsCurrentTextAndVersionWithoutOverwriting(string currentText)
+        {
+            var original = ReadActionText();
+            var repository = new FaultRepository(connection);
+            var first = repository.UpdateActionText(faultId, original.Version, currentText);
+
+            var conflict = repository.UpdateActionText(faultId, original.Version, "stale edit");
+
+            Assert.Equal(FaultActionTextUpdateStatus.Conflict, conflict.Status);
+            Assert.Equal(currentText, conflict.ActionText);
+            Assert.Equal(first.Version, conflict.Version);
+            var stored = ReadActionText();
+            Assert.Equal(currentText, stored.ActionText);
+            Assert.Equal(first.Version, stored.Version);
+
+            var retry = repository.UpdateActionText(faultId, conflict.Version, "resolved edit");
+            Assert.Equal(FaultActionTextUpdateStatus.Success, retry.Status);
+            Assert.Equal("resolved edit", ReadActionText().ActionText);
+        }
+
+        [Fact]
+        public void UpdateActionText_MissingFault_ThrowsKeyNotFoundException()
+        {
+            Assert.Throws<KeyNotFoundException>(() => new FaultRepository(connection)
+                .UpdateActionText(-1, ReadActionText().Version, "edit"));
+        }
+
+        private ActionTextRow ReadActionText()
+        {
+            return connection.QuerySingle<ActionTextRow>(
+                "SELECT ActionText, Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
+        }
+
+        private sealed class ActionTextRow
+        {
+            public string ActionText { get; set; }
+            public byte[] Version { get; set; }
+        }
+
         private byte ReadStatus()
         {
             return connection.QuerySingle<byte>("SELECT Status FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
