@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Dapper;
 using Data;
 using Microsoft.Data.SqlClient;
 using Xunit;
@@ -21,6 +22,8 @@ namespace IntegrationTests
         [InlineData("Data.Migrations.0006_CreateSystem.sql", "CREATE TABLE dbo.SYSTEM_NODE (")]
         [InlineData("Data.Migrations.0007_SeedSystemDemo.sql", "INSERT INTO dbo.EQUIPMENT")]
         [InlineData("Data.Migrations.0008_SeedFaultCauseCategory.sql", "CREATE TABLE dbo.FAULT_CAUSE_CATEGORY")]
+        [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Temperature REAL NULL;")]
+        [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Vibration REAL NULL;")]
         public void Assembly_ContainsMigration(string resourceName, string expectedSql)
         {
             using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
@@ -115,6 +118,96 @@ namespace IntegrationTests
             }
         }
 
+        [Fact]
+        public void Run_SampleMeasurements_UseNullableRealAndRoundTripSingleValues()
+        {
+            var connectionString = Environment.GetEnvironmentVariable("MINIMES_TEST_SQL_CONNECTION_STRING");
+            Assert.False(string.IsNullOrWhiteSpace(connectionString),
+                "Set MINIMES_TEST_SQL_CONNECTION_STRING to a test SQL Server connection string with CREATE DATABASE permission.");
+
+            var databaseName = "MiniMES_MigrationTests_" + Guid.NewGuid().ToString("N");
+            var builder = new SqlConnectionStringBuilder(connectionString)
+            {
+                InitialCatalog = "master",
+                Pooling = false
+            };
+
+            using (var admin = new SqlConnection(builder.ConnectionString))
+            {
+                admin.Open();
+                Execute(admin, "CREATE DATABASE [" + databaseName + "]");
+                try
+                {
+                    builder.InitialCatalog = databaseName;
+                    MigrationRunner.Run(builder.ConnectionString);
+
+                    using (var database = new SqlConnection(builder.ConnectionString))
+                    {
+                        database.Open();
+                        foreach (var columnName in new[] { "Temperature", "Vibration" })
+                        {
+                            var column = database.QuerySingle(@"
+SELECT t.name AS TypeName, c.is_nullable AS IsNullable
+FROM sys.columns c
+JOIN sys.types t ON c.user_type_id = t.user_type_id
+WHERE c.object_id = OBJECT_ID(@tableName) AND c.name = @columnName",
+                                new { tableName = "dbo.SAMPLE", columnName });
+                            Assert.Equal("real", (string)column.TypeName);
+                            Assert.True((bool)column.IsNullable);
+                        }
+
+                        var runId = Guid.NewGuid();
+                        var collectedAtUtc = new DateTime(2026, 11, 6, 1, 2, 3, DateTimeKind.Utc);
+                        const int equipmentId = 201;
+                        const string insertSample = @"
+INSERT INTO dbo.SAMPLE
+    (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration)
+VALUES (@runId, @sequenceNumber, @equipmentId, @collectedAtUtc, @temperature, @vibration)";
+                        var values = new[] { 23.456f, 1234.5f };
+                        for (var index = 0; index < values.Length; index++)
+                        {
+                            var expected = values[index];
+                            var parameters = new
+                            {
+                                runId, sequenceNumber = (long)index + 1, equipmentId, collectedAtUtc,
+                                temperature = expected, vibration = expected
+                            };
+                            database.Execute(insertSample, parameters);
+                            Assert.Equal(expected, database.QuerySingle<float>(@"
+SELECT Temperature FROM dbo.SAMPLE
+WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equipmentId",
+                                parameters));
+                            Assert.Equal(expected, database.QuerySingle<float>(@"
+SELECT Vibration FROM dbo.SAMPLE
+WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equipmentId",
+                                parameters));
+                        }
+
+                        var nullParameters = new
+                        {
+                            runId, sequenceNumber = 3L, equipmentId, collectedAtUtc,
+                            temperature = (float?)null, vibration = (float?)null
+                        };
+                        database.Execute(insertSample, nullParameters);
+                        Assert.Null(database.QuerySingle<float?>(@"
+SELECT Temperature FROM dbo.SAMPLE
+WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equipmentId",
+                            nullParameters));
+                        Assert.Null(database.QuerySingle<float?>(@"
+SELECT Vibration FROM dbo.SAMPLE
+WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equipmentId",
+                            nullParameters));
+                    }
+                }
+                finally
+                {
+                    Execute(admin, "ALTER DATABASE [" + databaseName +
+                        "] SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
+                    Execute(admin, "DROP DATABASE [" + databaseName + "]");
+                }
+            }
+        }
+
         private static void AssertMigrationOrder(SqlConnection connection)
         {
             var scripts = new List<string>();
@@ -137,7 +230,8 @@ namespace IntegrationTests
                 "Data.Migrations.0005_CreateAppUser.sql",
                 "Data.Migrations.0006_CreateSystem.sql",
                 "Data.Migrations.0007_SeedSystemDemo.sql",
-                "Data.Migrations.0008_SeedFaultCauseCategory.sql"
+                "Data.Migrations.0008_SeedFaultCauseCategory.sql",
+                "Data.Migrations.0009_AlterSampleMeasurementsToReal.sql"
             }, scripts);
         }
 
@@ -158,12 +252,16 @@ namespace IntegrationTests
             var alarmId = Scalar(connection,
                 "INSERT INTO dbo.ALARM (EquipmentId, Cause, RaisedAtUtc) OUTPUT INSERTED.AlarmId " +
                 "VALUES (1, 1, SYSUTCDATETIME())");
-            var insertFault = "INSERT INTO dbo.FAULT (AlarmId, Status, RegisteredAtUtc, CauseCategory) " +
-                "VALUES (" + alarmId + ", 1, SYSUTCDATETIME(), ";
-            var error = Assert.Throws<SqlException>(() => Execute(connection, insertFault + "7)"));
+            const string insertFault = @"
+INSERT INTO dbo.FAULT (AlarmId, Status, RegisteredAtUtc, CauseCategory)
+VALUES (@alarmId, @status, @registeredAtUtc, @causeCategory)";
+            var registeredAtUtc = DateTime.UtcNow;
+            var error = Assert.Throws<SqlException>(() => connection.Execute(insertFault,
+                new { alarmId, status = 1, registeredAtUtc, causeCategory = 7 }));
             Assert.Equal(547, error.Number);
             Assert.Contains("FK_FAULT_CauseCategory", error.Message);
-            Execute(connection, insertFault + "1)");
+            connection.Execute(insertFault,
+                new { alarmId, status = 1, registeredAtUtc, causeCategory = 1 });
         }
 
         private static void VerifyDemoTree(SqlConnection connection)
@@ -214,25 +312,28 @@ ORDER BY s.Name, t.NodePath", connection))
             Execute(connection, "INSERT INTO dbo.EQUIPMENT (EquipmentId, Name) VALUES (101, N'Equipment 101'), (102, N'Equipment 102')");
             var systemId = Scalar(connection,
                 "INSERT INTO dbo.[SYSTEM] (Name) OUTPUT INSERTED.SystemId VALUES (N'System 1')");
-            var rootId = Scalar(connection,
-                "INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder) OUTPUT INSERTED.NodeId " +
-                "VALUES (" + systemId + ", 2, 0)");
-            var insertChild = "INSERT INTO dbo.SYSTEM_NODE " +
-                "(SystemId, ParentNodeId, NodeType, EquipmentId, SortOrder) VALUES (" +
-                systemId + ", " + rootId + ", ";
-            Execute(connection, insertChild + "1, 101, 0)");
+            var rootId = connection.QuerySingle<int>(@"
+INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder)
+OUTPUT INSERTED.NodeId VALUES (@systemId, @nodeType, @sortOrder)",
+                new { systemId, nodeType = 2, sortOrder = 0 });
+            const string insertChild = @"
+INSERT INTO dbo.SYSTEM_NODE (SystemId, ParentNodeId, NodeType, EquipmentId, SortOrder)
+VALUES (@systemId, @rootId, @nodeType, @equipmentId, @sortOrder)";
+            connection.Execute(insertChild,
+                new { systemId, rootId, nodeType = 1, equipmentId = 101, sortOrder = 0 });
 
-            Assert.Equal(2601, Assert.Throws<SqlException>(() =>
-                Execute(connection, insertChild + "1, 101, 1)")).Number);
-            Assert.Equal(2601, Assert.Throws<SqlException>(() => Execute(connection,
-                "INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder) VALUES (" +
-                systemId + ", 3, 1)")).Number);
-            Assert.Equal(547, Assert.Throws<SqlException>(() =>
-                Execute(connection, insertChild + "1, NULL, 1)")).Number);
-            Assert.Equal(547, Assert.Throws<SqlException>(() =>
-                Execute(connection, insertChild + "2, 102, 1)")).Number);
-            Assert.Equal(547, Assert.Throws<SqlException>(() =>
-                Execute(connection, insertChild + "4, NULL, 1)")).Number);
+            Assert.Equal(2601, Assert.Throws<SqlException>(() => connection.Execute(insertChild,
+                new { systemId, rootId, nodeType = 1, equipmentId = 101, sortOrder = 1 })).Number);
+            Assert.Equal(2601, Assert.Throws<SqlException>(() => connection.Execute(@"
+INSERT INTO dbo.SYSTEM_NODE (SystemId, NodeType, SortOrder)
+VALUES (@systemId, @nodeType, @sortOrder)",
+                new { systemId, nodeType = 3, sortOrder = 1 })).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() => connection.Execute(insertChild,
+                new { systemId, rootId, nodeType = 1, equipmentId = (int?)null, sortOrder = 1 })).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() => connection.Execute(insertChild,
+                new { systemId, rootId, nodeType = 2, equipmentId = 102, sortOrder = 1 })).Number);
+            Assert.Equal(547, Assert.Throws<SqlException>(() => connection.Execute(insertChild,
+                new { systemId, rootId, nodeType = 4, equipmentId = (int?)null, sortOrder = 1 })).Number);
         }
 
         private static void Execute(SqlConnection connection, string sql)
