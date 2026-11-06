@@ -39,6 +39,9 @@ namespace IntegrationTests
                 using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream("Data.Migrations.0001_CreateSample.sql"))
                 using (var reader = new StreamReader(stream))
                     connection.Execute(reader.ReadToEnd());
+                using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql"))
+                using (var reader = new StreamReader(stream))
+                    connection.Execute(reader.ReadToEnd());
             }
             catch
             {
@@ -92,6 +95,108 @@ namespace IntegrationTests
 
             Assert.Equal(1, connection.ExecuteScalar<int>("SELECT 1"));
         }
+
+        [Fact]
+        public void SaveSamples_ReplayedBatch_CountsEveryDuplicate()
+        {
+            var samples = new[] { NewSample(1), NewSample(2) };
+            var repository = new SampleRepository(connection);
+            var first = repository.SaveSamples(samples);
+            var replay = repository.SaveSamples(samples);
+
+            Assert.Equal(2, first.StoredCount);
+            Assert.Equal(0, first.DuplicateCount);
+            Assert.Equal(0, replay.StoredCount);
+            Assert.Equal(2, replay.DuplicateCount);
+            foreach (var sample in samples)
+                Assert.Equal(1, connection.ExecuteScalar<int>(@"
+SELECT COUNT(*) FROM dbo.SAMPLE
+WHERE EquipmentId = @EquipmentId AND RunId = @RunId AND SequenceNumber = @SequenceNumber", sample));
+        }
+
+        [Fact]
+        public void SaveSamples_RepeatedKeyInBatch_KeepsFirstValues()
+        {
+            var first = NewSample(1);
+            first.Temperature = 12.34567f;
+            var repeated = NewSample(1);
+            repeated.RunId = first.RunId;
+            repeated.Temperature = 99f;
+            var result = new SampleRepository(connection).SaveSamples(new[] { first, repeated });
+
+            Assert.Equal(1, result.StoredCount);
+            Assert.Equal(1, result.DuplicateCount);
+            Assert.Equal(first.Temperature, connection.QuerySingle<float?>("SELECT Temperature FROM dbo.SAMPLE"));
+        }
+
+        [Fact]
+        public void SaveSamples_PreservesRealNullAndMillisecondValues()
+        {
+            var sample = NewSample(1234567890123L);
+            sample.Temperature = 12.345678f;
+            sample.Vibration = -0.12345678f;
+            sample.StatusCode = 255;
+            var empty = NewSample(2);
+            new SampleRepository(connection).SaveSamples(new[] { sample, empty });
+            var rows = connection.Query<SampleRecord>(@"
+SELECT RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration, StatusCode
+FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
+
+            Assert.Equal(2, rows.Length);
+            Assert.Equal(sample.RunId, rows[0].RunId);
+            Assert.Equal(sample.SequenceNumber, rows[0].SequenceNumber);
+            Assert.Equal(sample.EquipmentId, rows[0].EquipmentId);
+            Assert.Equal(sample.CollectedAtUtc, rows[0].CollectedAtUtc);
+            Assert.Equal(sample.Temperature, rows[0].Temperature);
+            Assert.Equal(sample.Vibration, rows[0].Vibration);
+            Assert.Equal(sample.StatusCode, rows[0].StatusCode);
+            Assert.Null(rows[1].Temperature);
+            Assert.Null(rows[1].Vibration);
+            Assert.Null(rows[1].StatusCode);
+            Assert.Equal(empty.CollectedAtUtc, rows[1].CollectedAtUtc);
+        }
+
+        [Fact]
+        public void SaveSamples_CallerTransaction_CanRollBack()
+        {
+            using (var transaction = connection.BeginTransaction())
+            {
+                var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) }, transaction);
+                Assert.Equal(1, result.StoredCount);
+                Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE", transaction: transaction));
+                transaction.Rollback();
+            }
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+        }
+
+        [Fact]
+        public void SaveSamples_InvalidEntry_RollsBackWholeBatch()
+        {
+            Assert.Throws<ArgumentException>(() => new SampleRepository(connection)
+                .SaveSamples(new[] { NewSample(1), null }));
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+        }
+
+        [Fact]
+        public void SaveSamples_ClosedConnection_RestoresClosedState()
+        {
+            connection.Close();
+            var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) });
+            Assert.Equal(1, result.StoredCount);
+            Assert.Equal(ConnectionState.Closed, connection.State);
+            connection.Open();
+            Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+        }
+
+        private SampleRecord NewSample(long sequence)
+        {
+            return new SampleRecord
+            {
+                RunId = Guid.NewGuid(), SequenceNumber = sequence,
+                EquipmentId = 1, CollectedAtUtc = fromUtc
+            };
+        }
+
 
         private void InsertSample(int equipmentId, DateTime collectedAtUtc, byte? statusCode)
         {
