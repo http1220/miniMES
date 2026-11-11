@@ -21,7 +21,7 @@ namespace Data
 UPDATE dbo.ALARM
 SET AcknowledgedAtUtc = @now, AcknowledgedBy = @userId
 WHERE AlarmId = @alarmId AND AcknowledgedAtUtc IS NULL",
-                new { now = nowUtc, userId, alarmId });
+                AcknowledgementParameters(alarmId, userId, nowUtc));
 
             if (affectedRows == 1)
             {
@@ -39,11 +39,18 @@ SELECT AcknowledgedBy FROM dbo.ALARM WHERE AlarmId = @alarmId", new { alarmId })
 
             if (existing == null)
             {
-                throw new KeyNotFoundException("The requested alarm does not exist.");
+                return new AlarmAcknowledgementResult(AlarmAcknowledgementStatus.NotFound, null);
             }
 
             return new AlarmAcknowledgementResult(
                 AlarmAcknowledgementStatus.AlreadyAcknowledged, existing.AcknowledgedBy);
+        }
+
+        private static DynamicParameters AcknowledgementParameters(int alarmId, int userId, DateTime nowUtc)
+        {
+            var parameters = new DynamicParameters(new { alarmId, userId });
+            parameters.Add("now", nowUtc, DbType.DateTime2);
+            return parameters;
         }
 
         public AlarmEventBatchResult ApplyEvents(IEnumerable<AlarmEventRecord> events)

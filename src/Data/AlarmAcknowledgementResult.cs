@@ -3,7 +3,8 @@ namespace Data
     public enum AlarmAcknowledgementStatus
     {
         Success,
-        AlreadyAcknowledged
+        AlreadyAcknowledged,
+        NotFound
     }
 
     public sealed class AlarmAcknowledgementResult

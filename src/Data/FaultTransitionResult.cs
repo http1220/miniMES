@@ -3,20 +3,22 @@ namespace Data
     public enum FaultTransitionStatus
     {
         Success,
-        StatusMismatch
+        StatusMismatch,
+        NotFound,
+        ActiveFaultExists
     }
 
     public sealed class FaultTransitionResult
     {
-        internal FaultTransitionResult(FaultTransitionStatus status, byte currentStatus)
+        internal FaultTransitionResult(FaultTransitionStatus status, byte currentStatus = 0, int? faultId = null)
         {
             Status = status;
             CurrentStatus = currentStatus;
+            FaultId = faultId;
         }
 
         public FaultTransitionStatus Status { get; }
-
-        // 1 = registered, 2 = in progress, 3 = closed, 4 = cancelled.
         public byte CurrentStatus { get; }
+        public int? FaultId { get; }
     }
 }

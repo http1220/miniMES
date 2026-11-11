@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Dapper;
 using Data;
 using Microsoft.Data.SqlClient;
@@ -67,6 +68,7 @@ namespace IntegrationTests
                         database.Open();
                         AssertMigrationOrder(database);
                         VerifyCollectorConstraints(database);
+                        VerifyFaultSchema(database);
                         VerifySystemConstraints(database);
                         VerifyFaultCauseCategory(database);
                         VerifyDemoTree(database);
@@ -79,7 +81,7 @@ namespace IntegrationTests
                         Execute(database, "INSERT INTO dbo.APP_USER (Name) VALUES (N'Test User')");
                         Assert.Equal(1, Scalar(database,
                             "SELECT COUNT(*) FROM dbo.APP_USER WHERE Name = N'Test User' AND IsActive = 1"));
-                        Assert.Equal(9, Scalar(database,
+                        Assert.Equal(10, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT')"));
                         Assert.Equal(7, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT_HISTORY')"));
@@ -112,6 +114,7 @@ namespace IntegrationTests
                         VerifyDemoTree(database);
                         AssertMigrationOrder(database);
                         VerifyCollectorConstraints(database);
+                        VerifyFaultSchema(database);
                     }
                 }
                 finally
@@ -261,6 +264,31 @@ VALUES (@runId, @sequence, 1, 1, @type, SYSUTCDATETIME())";
             }
         }
 
+        private static void VerifyFaultSchema(SqlConnection database)
+        {
+            Assert.Equal(3, Scalar(database, @"SELECT COUNT(*) FROM sys.columns
+WHERE object_id = OBJECT_ID('dbo.FAULT') AND name IN ('RecoveredAtUtc', 'ClosedAtUtc', 'CauseText')"));
+            Assert.Equal(0, Scalar(database, @"SELECT COUNT(*) FROM sys.columns
+WHERE object_id = OBJECT_ID('dbo.FAULT') AND name IN ('CompletedAtUtc', 'CancelReason')"));
+            Assert.Equal(0, Scalar(database, @"SELECT COUNT(*) FROM sys.indexes
+WHERE object_id = OBJECT_ID('dbo.FAULT') AND name = 'UQ_FAULT_AlarmId'"));
+            var filter = database.QuerySingle<string>(@"SELECT filter_definition FROM sys.indexes
+WHERE object_id = OBJECT_ID('dbo.FAULT') AND name = 'UX_FAULT_AlarmId_NotCancelled'
+AND is_unique = 1 AND has_filter = 1");
+            Assert.Equal("Status<>4", filter.Replace("[", "").Replace("]", "").Replace("(", "").Replace(")", "").Replace(" ", ""));
+            Assert.Equal(new[] { "FaultId", "FaultHistoryId" }, database.Query<string>(@"SELECT c.name
+FROM sys.indexes i JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = OBJECT_ID('dbo.FAULT_HISTORY') AND i.name = 'IX_FAULT_HISTORY_Fault'
+AND ic.key_ordinal > 0 ORDER BY ic.key_ordinal").ToArray());
+            Assert.Equal(1, Scalar(database, @"SELECT COUNT(*) FROM sys.foreign_keys f
+JOIN sys.foreign_key_columns fc ON fc.constraint_object_id = f.object_id
+WHERE f.name = 'FK_ALARM_APP_USER' AND f.parent_object_id = OBJECT_ID('dbo.ALARM')
+AND f.referenced_object_id = OBJECT_ID('dbo.APP_USER') AND f.is_disabled = 0 AND f.is_not_trusted = 0
+AND COL_NAME(fc.parent_object_id, fc.parent_column_id) = 'AcknowledgedBy'
+AND COL_NAME(fc.referenced_object_id, fc.referenced_column_id) = 'UserId'"));
+        }
+
         private static void AssertMigrationOrder(SqlConnection connection)
         {
             var scripts = new List<string>();
@@ -285,7 +313,8 @@ VALUES (@runId, @sequence, 1, 1, @type, SYSUTCDATETIME())";
                 "Data.Migrations.0007_SeedSystemDemo.sql",
                 "Data.Migrations.0008_SeedFaultCauseCategory.sql",
                 "Data.Migrations.0009_AlterSampleMeasurementsToReal.sql",
-                "Data.Migrations.0010_AddCollectorRunAndEventLinks.sql"
+                "Data.Migrations.0010_AddCollectorRunAndEventLinks.sql",
+                "Data.Migrations.0011_AlignFaultWithErd.sql"
             }, scripts);
         }
 

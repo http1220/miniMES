@@ -38,6 +38,7 @@ namespace IntegrationTests
                 connection.Open();
                 MigrationRunner.Run(builder.ConnectionString);
                 new CollectorRunRepository(connection).EnsureRun(runId, DateTime.UtcNow);
+                connection.Execute("SET IDENTITY_INSERT dbo.APP_USER ON; INSERT INTO dbo.APP_USER (UserId, Name) VALUES (101, N'First'), (202, N'Second'); SET IDENTITY_INSERT dbo.APP_USER OFF;");
             }
             catch
             {
@@ -77,10 +78,20 @@ SET AcknowledgedAtUtc = @originalTime, AcknowledgedBy = @userId WHERE AlarmId = 
         }
 
         [Fact]
-        public void AcknowledgeAlarm_MissingAlarm_ThrowsKeyNotFoundException()
+        public void AcknowledgeAlarm_MissingAlarm_ReturnsNotFound()
         {
-            Assert.Throws<KeyNotFoundException>(() =>
-                new AlarmRepository(connection).AcknowledgeAlarm(-1, 101, DateTime.UtcNow));
+            Assert.Equal(AlarmAcknowledgementStatus.NotFound,
+                new AlarmRepository(connection).AcknowledgeAlarm(-1, 101, DateTime.UtcNow).Status);
+        }
+
+        [Fact]
+        public void AcknowledgeAlarm_MissingUser_ThrowsAndPreservesAlarm()
+        {
+            var alarmId = InsertAlarm();
+            Assert.Equal(547, Assert.Throws<SqlException>(() => new AlarmRepository(connection)
+                .AcknowledgeAlarm(alarmId, -1, DateTime.UtcNow)).Number);
+            Assert.Equal(1, connection.ExecuteScalar<int>(@"SELECT COUNT(*) FROM dbo.ALARM
+WHERE AlarmId = @alarmId AND AcknowledgedAtUtc IS NULL AND AcknowledgedBy IS NULL", new { alarmId }));
         }
 
         [Fact]
