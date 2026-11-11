@@ -11,7 +11,6 @@ namespace IntegrationTests
     public class MigrationRunnerTests
     {
         [Theory]
-        [InlineData("Data.Migrations.0010_AddCollectorRunAndEventLinks.sql", "CREATE TABLE dbo.COLLECTOR_RUN")]
         [InlineData("Data.Migrations.0001_CreateSample.sql", "CREATE TABLE SAMPLE")]
         [InlineData("Data.Migrations.0002_CreateAlarm.sql", "CREATE TABLE dbo.ALARM")]
         [InlineData("Data.Migrations.0003_CreateAlarmEvent.sql", "CREATE TABLE dbo.ALARM_EVENT")]
@@ -25,6 +24,7 @@ namespace IntegrationTests
         [InlineData("Data.Migrations.0008_SeedFaultCauseCategory.sql", "CREATE TABLE dbo.FAULT_CAUSE_CATEGORY")]
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Temperature REAL NULL;")]
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Vibration REAL NULL;")]
+        [InlineData("Data.Migrations.0010_AddCollectorRunAndEventLinks.sql", "CREATE TABLE dbo.COLLECTOR_RUN")]
         public void Assembly_ContainsMigration(string resourceName, string expectedSql)
         {
             using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
