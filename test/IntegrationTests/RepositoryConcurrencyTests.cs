@@ -98,7 +98,7 @@ WHERE AlarmId = @alarmId", new { alarmId });
                 setup.Execute(@"DELETE FROM dbo.FAULT_HISTORY WHERE FaultId = @faultId;
 UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
                 var reasons = new[] { "작업자 1 전환 " + iteration, "작업자 2 전환 " + iteration };
-                var results = RunPair(i => repositories[i].TransitionFault(faultId, 1, 2, userIds[i], times[i], reasons[i]));
+                var results = RunPair(i => repositories[i].TransitionFault(faultId, 1, 2, userIds[i], times[i], reasons[i], null));
 
                 Assert.Single(results, result => result.Status == FaultTransitionStatus.Success);
                 var loser = Assert.Single(results, result => result.Status == FaultTransitionStatus.StatusMismatch);
@@ -118,24 +118,28 @@ UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
         }
 
         [Fact]
-        public void UpdateActionText_ConcurrentRequests_ExactlyOneWinsAndConflictReturnsWinner()
+        public void UpdateTexts_ConcurrentRequests_ExactlyOneWinsAndConflictReturnsWinner()
         {
             var repositories = workers.Select(connection => new FaultRepository(connection)).ToArray();
             Repeat(iteration =>
             {
                 var version = setup.QuerySingle<byte[]>("SELECT Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
                 var texts = new[] { "작업자 1 수정 " + iteration, "작업자 2 수정 " + iteration };
-                var results = RunPair(i => repositories[i].UpdateActionText(faultId, version, texts[i]));
+                var results = RunPair(i => repositories[i].UpdateTexts(faultId, version, (byte)(i + 1), "cause " + i, texts[i]));
 
-                var success = Assert.Single(results, result => result.Status == FaultActionTextUpdateStatus.Success);
-                var conflict = Assert.Single(results, result => result.Status == FaultActionTextUpdateStatus.Conflict);
-                var winner = Array.FindIndex(results, result => result.Status == FaultActionTextUpdateStatus.Success);
+                var success = Assert.Single(results, result => result.Status == FaultTextsUpdateStatus.Success);
+                var conflict = Assert.Single(results, result => result.Status == FaultTextsUpdateStatus.Conflict);
+                var winner = Array.FindIndex(results, result => result.Status == FaultTextsUpdateStatus.Success);
                 Assert.Equal(texts[winner], conflict.ActionText);
+                Assert.Equal((byte)(winner + 1), conflict.CauseCategory);
+                Assert.Equal("cause " + winner, conflict.CauseText);
                 Assert.Equal(success.Version, conflict.Version);
                 Assert.NotEqual(version, success.Version);
                 var stored = setup.QuerySingle<ActionTextRow>(
-                    "SELECT ActionText, Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
+                    "SELECT CauseCategory, CauseText, ActionText, Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
                 Assert.Equal(texts[winner], stored.ActionText);
+                Assert.Equal((byte)(winner + 1), stored.CauseCategory);
+                Assert.Equal("cause " + winner, stored.CauseText);
                 Assert.Equal(success.Version, stored.Version);
             });
         }
@@ -157,6 +161,78 @@ UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
                 var stored = setup.QuerySingle<DateTime>("SELECT StartedAtUtc FROM dbo.COLLECTOR_RUN WHERE RunId = @runId", new { runId });
                 Assert.Contains(stored, times);
             });
+        }
+
+        [Fact]
+        public void RegisterFault_ConcurrentRequests_ExactlyOneWinsWithExistingId()
+        {
+            var observed = workers.Select(worker => new DelayedFaultReadConnection(worker)).ToArray();
+            var repositories = observed.Select(worker => new FaultRepository(worker)).ToArray();
+            Repeat(iteration =>
+            {
+                ClearFaults();
+                var before = observed.Sum(worker => worker.EmptyActiveReads);
+                FaultRegisterResult[] results;
+                try
+                {
+                    results = RunPair(i => repositories[i].RegisterFault(alarmId, 1, "cause " + i, "action " + i, times[i]));
+                }
+                finally
+                {
+                    output.WriteLine("Iteration {0}: empty active-fault lookups = {1}; two empty lookups prove overlap before insert.",
+                        iteration, observed.Sum(worker => worker.EmptyActiveReads) - before);
+                }
+                Assert.Equal(1, observed.Sum(worker => worker.EmptyActiveReads) - before);
+                var winner = Assert.Single(results, result => result.Status == FaultRegisterStatus.Success);
+                var loser = Assert.Single(results, result => result.Status == FaultRegisterStatus.AlreadyRegistered);
+                Assert.Equal(winner.FaultId, loser.FaultId);
+                Assert.Equal(winner.FaultId, setup.QuerySingle<int>("SELECT FaultId FROM dbo.FAULT WHERE AlarmId = @alarmId AND Status <> 4", new { alarmId }));
+                Assert.Equal(1, ActiveFaultCount());
+                Assert.Equal(0, setup.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.FAULT_HISTORY"));
+            });
+        }
+
+        [Fact]
+        public void TransitionFault_RestoreVersusRegister_ExactlyOneWins()
+        {
+            var repositories = workers.Select(worker => new FaultRepository(new DelayedFaultReadConnection(worker))).ToArray();
+            Repeat(iteration =>
+            {
+                ClearFaults();
+                var cancelledId = setup.QuerySingle<int>(@"INSERT INTO dbo.FAULT (AlarmId, Status, RegisteredAtUtc, CauseCategory)
+OUTPUT inserted.FaultId VALUES (@alarmId, 4, @now, 1)", new { alarmId, now = times[0] });
+                FaultTransitionResult restored = null;
+                FaultRegisterResult registered = null;
+                RunPair(i =>
+                {
+                    if (i == 0)
+                        restored = repositories[i].TransitionFault(cancelledId, 4, 1, userIds[i], times[i], "restore", null);
+                    else
+                        registered = repositories[i].RegisterFault(alarmId, 1, null, null, times[i]);
+                    return true;
+                });
+                var restoreWon = restored.Status == FaultTransitionStatus.Success;
+                Assert.Equal(restoreWon ? FaultRegisterStatus.AlreadyRegistered : FaultRegisterStatus.Success, registered.Status);
+                Assert.Equal(restoreWon ? FaultTransitionStatus.Success : FaultTransitionStatus.ActiveFaultExists, restored.Status);
+                if (restoreWon)
+                    Assert.Equal(cancelledId, registered.FaultId);
+                else
+                    Assert.Equal(registered.FaultId, restored.FaultId);
+                Assert.Equal(1, ActiveFaultCount());
+                Assert.Equal(restoreWon ? 1 : 0, setup.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.FAULT_HISTORY"));
+                Assert.Equal(restoreWon ? (byte)1 : (byte)4, setup.QuerySingle<byte>(
+                    "SELECT Status FROM dbo.FAULT WHERE FaultId = @cancelledId", new { cancelledId }));
+            });
+        }
+
+        private void ClearFaults()
+        {
+            setup.Execute("DELETE FROM dbo.FAULT_HISTORY; DELETE FROM dbo.FAULT;");
+        }
+
+        private int ActiveFaultCount()
+        {
+            return setup.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.FAULT WHERE AlarmId = @alarmId AND Status <> 4", new { alarmId });
         }
 
         private void Repeat(Action<int> check)
@@ -211,6 +287,8 @@ UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
 
         private sealed class ActionTextRow
         {
+            public byte CauseCategory { get; set; }
+            public string CauseText { get; set; }
             public string ActionText { get; set; }
             public byte[] Version { get; set; }
         }
