@@ -15,13 +15,13 @@ namespace Data
             this.connection = connection ?? throw new ArgumentNullException(nameof(connection));
         }
 
-        public SampleBatchResult SaveSamples(IEnumerable<SampleRecord> samples)
+        public SampleBatchResult SaveSamples(IEnumerable<SampleRecord> samples, DateTime recordedAtUtc)
         {
-            return SaveSamples(samples, null);
+            return SaveSamples(samples, recordedAtUtc, null);
         }
 
         // A supplied transaction remains under caller control, including on failure.
-        public SampleBatchResult SaveSamples(IEnumerable<SampleRecord> samples, IDbTransaction transaction)
+        public SampleBatchResult SaveSamples(IEnumerable<SampleRecord> samples, DateTime recordedAtUtc, IDbTransaction transaction)
         {
             if (samples == null)
                 throw new ArgumentNullException(nameof(samples));
@@ -34,11 +34,12 @@ namespace Data
                     if (sample == null)
                         throw new ArgumentException("Samples cannot contain null entries.", nameof(samples));
                     var parameters = new DynamicParameters(sample);
+                    parameters.Add("RecordedAtUtc", recordedAtUtc, DbType.DateTime2);
                     parameters.Add("CollectedAtUtc", sample.CollectedAtUtc, DbType.DateTime2);
                     var count = connection.Execute(@"
 INSERT INTO dbo.SAMPLE
-    (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration, StatusCode)
-SELECT @RunId, @SequenceNumber, @EquipmentId, @CollectedAtUtc, @Temperature, @Vibration, @StatusCode
+    (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration, StatusCode, RecordedAtUtc)
+SELECT @RunId, @SequenceNumber, @EquipmentId, @CollectedAtUtc, @Temperature, @Vibration, @StatusCode, @RecordedAtUtc
 WHERE NOT EXISTS (
     SELECT 1 FROM dbo.SAMPLE WITH (UPDLOCK, HOLDLOCK)
     WHERE EquipmentId = @EquipmentId AND RunId = @RunId AND SequenceNumber = @SequenceNumber)",

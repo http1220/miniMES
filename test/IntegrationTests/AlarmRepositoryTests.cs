@@ -13,6 +13,7 @@ namespace IntegrationTests
     public sealed class AlarmRepositoryTests : IDisposable
     {
         private readonly string databaseName = "MiniMES_AlarmTests_" + Guid.NewGuid().ToString("N");
+        private readonly Guid runId = Guid.NewGuid();
         private readonly SqlConnection admin;
         private readonly SqlConnection connection;
 
@@ -35,16 +36,8 @@ namespace IntegrationTests
             try
             {
                 connection.Open();
-                using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
-                    "Data.Migrations.0002_CreateAlarm.sql"))
-                using (var reader = new StreamReader(stream))
-                {
-                    connection.Execute(reader.ReadToEnd());
-                }
-                using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
-                    "Data.Migrations.0003_CreateAlarmEvent.sql"))
-                using (var reader = new StreamReader(stream))
-                    connection.Execute(reader.ReadToEnd());
+                MigrationRunner.Run(builder.ConnectionString);
+                new CollectorRunRepository(connection).EnsureRun(runId, DateTime.UtcNow);
             }
             catch
             {
@@ -163,6 +156,8 @@ SET AcknowledgedAtUtc = @originalTime, AcknowledgedBy = @userId WHERE AlarmId = 
             raised.RunId = new Guid("ffffffff-ffff-ffff-ffff-ffffffffffff");
             var cleared = NewEvent(1, 2);
             cleared.RunId = new Guid("00000000-0000-0000-0000-000000000001");
+            new CollectorRunRepository(connection).EnsureRun(raised.RunId, DateTime.UtcNow);
+            new CollectorRunRepository(connection).EnsureRun(cleared.RunId, DateTime.UtcNow);
             var result = new AlarmRepository(connection).ApplyEvents(new[] { raised, cleared });
 
             Assert.Equal(2, result.AppliedCount);
@@ -212,10 +207,10 @@ SET AcknowledgedAtUtc = @originalTime, AcknowledgedBy = @userId WHERE AlarmId = 
         }
 
         [Fact]
-        public void ApplyEvents_StateReportInBatch_RejectsBeforeAnyDatabaseChange()
+        public void ApplyEvents_UnsupportedTypeInBatch_RejectsBeforeAnyDatabaseChange()
         {
             Assert.Throws<ArgumentException>(() => new AlarmRepository(connection)
-                .ApplyEvents(new[] { NewEvent(1, 1), NewEvent(2, 3) }));
+                .ApplyEvents(new[] { NewEvent(1, 1), NewEvent(2, 5) }));
             Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM_EVENT"));
             Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM"));
         }
@@ -263,11 +258,85 @@ SET AcknowledgedAtUtc = @originalTime, AcknowledgedBy = @userId WHERE AlarmId = 
             Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM_EVENT"));
         }
 
-        private static AlarmEventRecord NewEvent(long sequence, byte eventType)
+        [Theory]
+        [InlineData(1, false)]
+        [InlineData(1, true)]
+        [InlineData(2, false)]
+        [InlineData(2, true)]
+        [InlineData(3, false)]
+        [InlineData(3, true)]
+        [InlineData(4, false)]
+        [InlineData(4, true)]
+        public void ApplyEvents_StateMatrix_LinksOnlyChangedAlarm(byte eventType, bool active)
+        {
+            var originalTime = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+            int? originalId = null;
+            if (active)
+                originalId = connection.QuerySingle<int>(@"INSERT INTO dbo.ALARM
+(EquipmentId, Cause, RaisedAtUtc) OUTPUT INSERTED.AlarmId VALUES (1, 2, @originalTime)", new { originalTime });
+            var item = NewEvent(1, eventType);
+            var result = new AlarmRepository(connection).ApplyEvents(new[] { item });
+            var raises = eventType == 1 || eventType == 3;
+            var changed = raises != active;
+            Assert.Equal(1, result.AppliedCount);
+            Assert.Equal(0, result.DuplicateCount);
+            Assert.Equal((eventType == 1 && active) || (eventType == 2 && !active) ? 1 : 0,
+                result.Mismatches.Count);
+            var linkedId = connection.QuerySingle<int?>("SELECT AlarmId FROM dbo.ALARM_EVENT");
+            Assert.Equal(changed, linkedId.HasValue);
+            var rows = connection.Query<AlarmTimes>("SELECT RaisedAtUtc, ClearedAtUtc FROM dbo.ALARM").ToArray();
+            Assert.Equal(active || raises ? 1 : 0, rows.Length);
+            if (rows.Length == 1)
+            {
+                Assert.Equal(active ? originalTime : item.OccurredAtUtc, rows[0].RaisedAtUtc);
+                Assert.Equal(active && !raises ? (DateTime?)item.OccurredAtUtc : null, rows[0].ClearedAtUtc);
+                if (changed)
+                    Assert.Equal(connection.QuerySingle<int>("SELECT AlarmId FROM dbo.ALARM"), linkedId);
+                if (active && changed)
+                    Assert.Equal(originalId, linkedId);
+            }
+            var replay = new AlarmRepository(connection).ApplyEvents(new[] { item });
+            Assert.Equal(1, replay.DuplicateCount);
+            Assert.Equal(linkedId, connection.QuerySingle<int?>("SELECT AlarmId FROM dbo.ALARM_EVENT"));
+        }
+
+        [Fact]
+        public void ApplyEvents_MixedReports_EachAlarmHasOnlyItsOpeningAndClosingEvents()
+        {
+            var types = new byte[] { 1, 1, 3, 4, 4, 3, 3, 2, 2, 3 };
+            var events = types.Select((type, index) => NewEvent(index + 1, type)).ToArray();
+            new AlarmRepository(connection).ApplyEvents(events);
+            var alarms = connection.Query<int>("SELECT AlarmId FROM dbo.ALARM ORDER BY AlarmId").ToArray();
+            Assert.Equal(3, alarms.Length);
+            var expected = new[] { new long[] { 1, 4 }, new long[] { 6, 8 }, new long[] { 10 } };
+            for (var index = 0; index < alarms.Length; index++)
+            {
+                var id = alarms[index];
+                Assert.Equal(expected[index], connection.Query<long>(@"SELECT EventSequence FROM dbo.ALARM_EVENT
+WHERE AlarmId = @id ORDER BY EventSequence", new { id }).ToArray());
+                var times = connection.QuerySingle<AlarmTimes>("SELECT RaisedAtUtc, ClearedAtUtc FROM dbo.ALARM WHERE AlarmId = @id", new { id });
+                Assert.Equal(events[expected[index][0] - 1].OccurredAtUtc, times.RaisedAtUtc);
+                Assert.Equal(expected[index].Length == 2 ? (DateTime?)events[expected[index][1] - 1].OccurredAtUtc : null, times.ClearedAtUtc);
+            }
+        }
+
+        [Fact]
+        public void ApplyEvents_UnregisteredRun_RollsBackEventsAndAlarms()
+        {
+            var invalid = NewEvent(2, 4);
+            invalid.RunId = Guid.NewGuid();
+            var error = Assert.Throws<SqlException>(() => new AlarmRepository(connection)
+                .ApplyEvents(new[] { NewEvent(1, 1), invalid }));
+            Assert.Equal(547, error.Number);
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM_EVENT"));
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM"));
+        }
+
+        private AlarmEventRecord NewEvent(long sequence, byte eventType)
         {
             return new AlarmEventRecord
             {
-                RunId = Guid.NewGuid(), EventSequence = sequence, EquipmentId = 1,
+                RunId = runId, EventSequence = sequence, EquipmentId = 1,
                 Cause = 2, EventType = eventType,
                 OccurredAtUtc = new DateTime(2026, 11, 6, 1, 2, 3, 123, DateTimeKind.Utc).AddSeconds(sequence)
             };

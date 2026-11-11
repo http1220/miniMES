@@ -59,8 +59,8 @@ SELECT AcknowledgedBy FROM dbo.ALARM WHERE AlarmId = @alarmId", new { alarmId })
             var items = new List<AlarmEventRecord>();
             foreach (var item in events)
             {
-                if (item == null || (item.EventType != 1 && item.EventType != 2))
-                    throw new ArgumentException("Only raise and clear events are supported.", nameof(events));
+                if (item == null || (item.EventType < 1 || item.EventType > 4))
+                    throw new ArgumentException("Event type must be between 1 and 4.", nameof(events));
                 items.Add(item);
             }
 
@@ -90,22 +90,32 @@ WHERE NOT EXISTS (
 SELECT AlarmId FROM dbo.ALARM WITH (UPDLOCK, HOLDLOCK)
 WHERE EquipmentId = @EquipmentId AND Cause = @Cause AND ClearedAtUtc IS NULL",
                         parameters, current);
-                    if (item.EventType == 1 && !activeId.HasValue)
+                    int? changedAlarmId = null;
+                    if ((item.EventType == 1 || item.EventType == 3) && !activeId.HasValue)
                     {
-                        connection.Execute(@"
+                        changedAlarmId = connection.QuerySingle<int>(@"
 INSERT INTO dbo.ALARM (EquipmentId, Cause, RaisedAtUtc)
+OUTPUT INSERTED.AlarmId
 VALUES (@EquipmentId, @Cause, @OccurredAtUtc)", parameters, current);
                     }
-                    else if (item.EventType == 2 && activeId.HasValue)
+                    else if ((item.EventType == 2 || item.EventType == 4) && activeId.HasValue)
                     {
+                        changedAlarmId = activeId.Value;
                         parameters.Add("AlarmId", activeId.Value);
                         connection.Execute(@"
 UPDATE dbo.ALARM SET ClearedAtUtc = @OccurredAtUtc WHERE AlarmId = @AlarmId",
                             parameters, current);
                     }
-                    else
+                    else if (item.EventType == 1 || item.EventType == 2)
                     {
                         mismatches.Add(new AlarmEventMismatch(item));
+                    }
+                    if (changedAlarmId.HasValue)
+                    {
+                        parameters.Add("AlarmId", changedAlarmId.Value);
+                        connection.Execute(@"
+UPDATE dbo.ALARM_EVENT SET AlarmId = @AlarmId
+WHERE RunId = @RunId AND EventSequence = @EventSequence", parameters, current);
                     }
                 }
                 return new AlarmEventBatchResult(applied, duplicates, mismatches);
