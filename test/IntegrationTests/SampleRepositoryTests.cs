@@ -12,6 +12,8 @@ namespace IntegrationTests
     public sealed class SampleRepositoryTests : IDisposable
     {
         private readonly string databaseName = "MiniMES_SampleTests_" + Guid.NewGuid().ToString("N");
+        private readonly Guid runId = Guid.NewGuid();
+        private long nextInsertedSequenceNumber = 2000000000000L;
         private readonly SqlConnection admin;
         private readonly SqlConnection connection;
         private readonly DateTime fromUtc = new DateTime(2026, 11, 5, 0, 0, 0, 1, DateTimeKind.Utc);
@@ -36,12 +38,8 @@ namespace IntegrationTests
             try
             {
                 connection.Open();
-                using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream("Data.Migrations.0001_CreateSample.sql"))
-                using (var reader = new StreamReader(stream))
-                    connection.Execute(reader.ReadToEnd());
-                using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql"))
-                using (var reader = new StreamReader(stream))
-                    connection.Execute(reader.ReadToEnd());
+                MigrationRunner.Run(builder.ConnectionString);
+                new CollectorRunRepository(connection).EnsureRun(runId, DateTime.UtcNow);
             }
             catch
             {
@@ -101,8 +99,8 @@ namespace IntegrationTests
         {
             var samples = new[] { NewSample(1), NewSample(2) };
             var repository = new SampleRepository(connection);
-            var first = repository.SaveSamples(samples);
-            var replay = repository.SaveSamples(samples);
+            var first = repository.SaveSamples(samples, fromUtc);
+            var replay = repository.SaveSamples(samples, fromUtc);
 
             Assert.Equal(2, first.StoredCount);
             Assert.Equal(0, first.DuplicateCount);
@@ -122,7 +120,7 @@ WHERE EquipmentId = @EquipmentId AND RunId = @RunId AND SequenceNumber = @Sequen
             var repeated = NewSample(1);
             repeated.RunId = first.RunId;
             repeated.Temperature = 99f;
-            var result = new SampleRepository(connection).SaveSamples(new[] { first, repeated });
+            var result = new SampleRepository(connection).SaveSamples(new[] { first, repeated }, fromUtc);
 
             Assert.Equal(1, result.StoredCount);
             Assert.Equal(1, result.DuplicateCount);
@@ -137,7 +135,7 @@ WHERE EquipmentId = @EquipmentId AND RunId = @RunId AND SequenceNumber = @Sequen
             sample.Vibration = -0.12345678f;
             sample.StatusCode = 255;
             var empty = NewSample(2);
-            new SampleRepository(connection).SaveSamples(new[] { sample, empty });
+            new SampleRepository(connection).SaveSamples(new[] { sample, empty }, fromUtc);
             var rows = connection.Query<SampleRecord>(@"
 SELECT RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration, StatusCode
 FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
@@ -161,7 +159,7 @@ FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
         {
             using (var transaction = connection.BeginTransaction())
             {
-                var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) }, transaction);
+                var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) }, fromUtc, transaction);
                 Assert.Equal(1, result.StoredCount);
                 Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE", transaction: transaction));
                 transaction.Rollback();
@@ -173,7 +171,7 @@ FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
         public void SaveSamples_InvalidEntry_RollsBackWholeBatch()
         {
             Assert.Throws<ArgumentException>(() => new SampleRepository(connection)
-                .SaveSamples(new[] { NewSample(1), null }));
+                .SaveSamples(new[] { NewSample(1), null }, fromUtc));
             Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
         }
 
@@ -181,18 +179,75 @@ FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
         public void SaveSamples_ClosedConnection_RestoresClosedState()
         {
             connection.Close();
-            var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) });
+            var result = new SampleRepository(connection).SaveSamples(new[] { NewSample(1) }, fromUtc);
             Assert.Equal(1, result.StoredCount);
             Assert.Equal(ConnectionState.Closed, connection.State);
             connection.Open();
             Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
         }
 
+        [Fact]
+        public void EnsureRun_RepeatedRegistration_PreservesFirstStart()
+        {
+            var id = Guid.NewGuid();
+            var repository = new CollectorRunRepository(connection);
+            repository.EnsureRun(id, fromUtc);
+            Assert.Equal(fromUtc, connection.QuerySingle<DateTime>("SELECT StartedAtUtc FROM dbo.COLLECTOR_RUN WHERE RunId = @id", new { id }));
+            repository.EnsureRun(id, fromUtc.AddHours(1));
+            Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.COLLECTOR_RUN WHERE RunId = @id", new { id }));
+            Assert.Equal(fromUtc, connection.QuerySingle<DateTime>("SELECT StartedAtUtc FROM dbo.COLLECTOR_RUN WHERE RunId = @id", new { id }));
+        }
+
+        [Fact]
+        public void SaveSamples_RecordedTime_IsSharedAndPreservedOnReplay()
+        {
+            var samples = new[] { NewSample(1), NewSample(2) };
+            var repository = new SampleRepository(connection);
+            repository.SaveSamples(samples, fromUtc);
+            Assert.All(connection.Query<DateTime>("SELECT RecordedAtUtc FROM dbo.SAMPLE"), value => Assert.Equal(fromUtc, value));
+            repository.SaveSamples(samples, fromUtc.AddMilliseconds(123));
+            Assert.Equal(2, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+            Assert.All(connection.Query<DateTime>("SELECT RecordedAtUtc FROM dbo.SAMPLE"), value => Assert.Equal(fromUtc, value));
+        }
+
+        [Theory]
+        [InlineData(true)]
+        [InlineData(false)]
+        public void SaveSamples_InvalidForeignKey_RollsBackWholeBatch(bool missingEquipment)
+        {
+            var invalid = NewSample(2);
+            if (missingEquipment)
+                invalid.EquipmentId = 99;
+            else
+                invalid.RunId = Guid.NewGuid();
+            var error = Assert.Throws<SqlException>(() => new SampleRepository(connection)
+                .SaveSamples(new[] { NewSample(1), invalid }, fromUtc));
+            Assert.Equal(547, error.Number);
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+        }
+
+        [Fact]
+        public void EnsureRun_AndSaveSamples_CallerRollbackRemovesBoth()
+        {
+            var sample = NewSample(1);
+            sample.RunId = Guid.NewGuid();
+            using (var transaction = connection.BeginTransaction())
+            {
+                new CollectorRunRepository(connection).EnsureRun(sample.RunId, fromUtc, transaction);
+                new SampleRepository(connection).SaveSamples(new[] { sample }, fromUtc, transaction);
+                Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.COLLECTOR_RUN WHERE RunId = @RunId", sample, transaction));
+                Assert.Equal(1, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE", transaction: transaction));
+                transaction.Rollback();
+            }
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.COLLECTOR_RUN WHERE RunId = @RunId", sample));
+            Assert.Equal(0, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.SAMPLE"));
+        }
+
         private SampleRecord NewSample(long sequence)
         {
             return new SampleRecord
             {
-                RunId = Guid.NewGuid(), SequenceNumber = sequence,
+                RunId = runId, SequenceNumber = sequence,
                 EquipmentId = 1, CollectedAtUtc = fromUtc
             };
         }
@@ -200,10 +255,10 @@ FROM dbo.SAMPLE ORDER BY SequenceNumber DESC").ToArray();
 
         private void InsertSample(int equipmentId, DateTime collectedAtUtc, byte? statusCode)
         {
-            var parameters = new DynamicParameters(new { runId = Guid.NewGuid(), equipmentId, statusCode });
+            var parameters = new DynamicParameters(new { runId, sequenceNumber = nextInsertedSequenceNumber++, equipmentId, statusCode });
             parameters.Add("collectedAtUtc", collectedAtUtc, DbType.DateTime2);
-            connection.Execute(@"INSERT INTO dbo.SAMPLE (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, StatusCode)
-VALUES (@runId, 1, @equipmentId, @collectedAtUtc, @statusCode)",
+            connection.Execute(@"INSERT INTO dbo.SAMPLE (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, StatusCode, RecordedAtUtc)
+VALUES (@runId, @sequenceNumber, @equipmentId, @collectedAtUtc, @statusCode, @collectedAtUtc)",
                 parameters);
         }
 

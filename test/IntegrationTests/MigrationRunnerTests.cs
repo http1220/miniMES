@@ -24,6 +24,7 @@ namespace IntegrationTests
         [InlineData("Data.Migrations.0008_SeedFaultCauseCategory.sql", "CREATE TABLE dbo.FAULT_CAUSE_CATEGORY")]
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Temperature REAL NULL;")]
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Vibration REAL NULL;")]
+        [InlineData("Data.Migrations.0010_AddCollectorRunAndEventLinks.sql", "CREATE TABLE dbo.COLLECTOR_RUN")]
         public void Assembly_ContainsMigration(string resourceName, string expectedSql)
         {
             using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
@@ -65,6 +66,7 @@ namespace IntegrationTests
                     {
                         database.Open();
                         AssertMigrationOrder(database);
+                        VerifyCollectorConstraints(database);
                         VerifySystemConstraints(database);
                         VerifyFaultCauseCategory(database);
                         VerifyDemoTree(database);
@@ -81,7 +83,7 @@ namespace IntegrationTests
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT')"));
                         Assert.Equal(7, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.FAULT_HISTORY')"));
-                        Assert.Equal(6, Scalar(database,
+                        Assert.Equal(7, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.ALARM_EVENT')"));
                         Assert.Equal(7, Scalar(database,
                             "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.ALARM')"));
@@ -94,8 +96,10 @@ namespace IntegrationTests
                             "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID('dbo.SAMPLE') " +
                             "AND name = 'IX_SAMPLE_Equipment_CollectedAt' AND type = 1"));
                         Execute(database,
-                            "INSERT INTO dbo.SAMPLE (RunId, SequenceNumber, EquipmentId, CollectedAtUtc) " +
-                            "VALUES (NEWID(), 1, 1, SYSUTCDATETIME())");
+                            "DECLARE @runId uniqueidentifier = NEWID(); " +
+                            "INSERT INTO dbo.COLLECTOR_RUN VALUES (@runId, SYSUTCDATETIME()); " +
+                            "INSERT INTO dbo.SAMPLE (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, RecordedAtUtc) " +
+                            "VALUES (@runId, 1, 1, SYSUTCDATETIME(), SYSUTCDATETIME())");
                     }
 
                     MigrationRunner.Run(builder.ConnectionString);
@@ -107,6 +111,7 @@ namespace IntegrationTests
                         Assert.Equal(6, Scalar(database, "SELECT COUNT(*) FROM dbo.FAULT_CAUSE_CATEGORY"));
                         VerifyDemoTree(database);
                         AssertMigrationOrder(database);
+                        VerifyCollectorConstraints(database);
                     }
                 }
                 finally
@@ -158,11 +163,12 @@ WHERE c.object_id = OBJECT_ID(@tableName) AND c.name = @columnName",
 
                         var runId = Guid.NewGuid();
                         var collectedAtUtc = new DateTime(2026, 11, 6, 1, 2, 3, DateTimeKind.Utc);
-                        const int equipmentId = 201;
+                        const int equipmentId = 1;
+                        new CollectorRunRepository(database).EnsureRun(runId, collectedAtUtc);
                         const string insertSample = @"
 INSERT INTO dbo.SAMPLE
-    (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration)
-VALUES (@runId, @sequenceNumber, @equipmentId, @collectedAtUtc, @temperature, @vibration)";
+    (RunId, SequenceNumber, EquipmentId, CollectedAtUtc, Temperature, Vibration, RecordedAtUtc)
+VALUES (@runId, @sequenceNumber, @equipmentId, @collectedAtUtc, @temperature, @vibration, @collectedAtUtc)";
                         var values = new[] { 23.456f, 1234.5f };
                         for (var index = 0; index < values.Length; index++)
                         {
@@ -208,6 +214,53 @@ WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equ
             }
         }
 
+        private static void VerifyCollectorConstraints(SqlConnection database)
+        {
+            Assert.Equal(2, Scalar(database, "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.COLLECTOR_RUN')"));
+            Assert.Equal(1, Scalar(database, @"SELECT COUNT(*) FROM sys.indexes
+WHERE object_id = OBJECT_ID('dbo.COLLECTOR_RUN') AND name = 'PK_COLLECTOR_RUN' AND is_primary_key = 1"));
+            Assert.Equal(1, Scalar(database, @"SELECT COUNT(*) FROM sys.index_columns ic
+JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+JOIN sys.indexes i ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+WHERE i.object_id = OBJECT_ID('dbo.COLLECTOR_RUN') AND i.is_primary_key = 1 AND c.name = 'RunId' AND ic.key_ordinal = 1"));
+            foreach (var pair in new[]
+            {
+                new[] { "SAMPLE", "COLLECTOR_RUN", "RunId", "RunId" },
+                new[] { "ALARM_EVENT", "COLLECTOR_RUN", "RunId", "RunId" },
+                new[] { "SAMPLE", "EQUIPMENT", "EquipmentId", "EquipmentId" },
+                new[] { "ALARM", "EQUIPMENT", "EquipmentId", "EquipmentId" },
+                new[] { "ALARM_EVENT", "ALARM", "AlarmId", "AlarmId" }
+            })
+            {
+                Assert.Equal(1, database.ExecuteScalar<int>(@"SELECT COUNT(*) FROM sys.foreign_keys f
+JOIN sys.foreign_key_columns fc ON fc.constraint_object_id = f.object_id
+JOIN sys.columns child ON child.object_id = fc.parent_object_id AND child.column_id = fc.parent_column_id
+JOIN sys.columns parent ON parent.object_id = fc.referenced_object_id AND parent.column_id = fc.referenced_column_id
+WHERE f.name = @name AND f.parent_object_id = OBJECT_ID(@childTable)
+AND f.referenced_object_id = OBJECT_ID(@parentTable) AND child.name = @childColumn AND parent.name = @parentColumn
+AND f.is_disabled = 0 AND f.is_not_trusted = 0",
+                    new { name = "FK_" + pair[0] + "_" + pair[1], childTable = "dbo." + pair[0], parentTable = "dbo." + pair[1], childColumn = pair[2], parentColumn = pair[3] }));
+            }
+            Assert.Equal(0, Scalar(database, @"SELECT COUNT(*) FROM sys.default_constraints d
+JOIN sys.columns c ON c.object_id = d.parent_object_id AND c.column_id = d.parent_column_id
+WHERE d.parent_object_id = OBJECT_ID('dbo.SAMPLE') AND c.name = 'RecordedAtUtc'"));
+            using (var transaction = database.BeginTransaction())
+            {
+                var runId = Guid.NewGuid();
+                new CollectorRunRepository(database).EnsureRun(runId, DateTime.UtcNow, transaction);
+                const string insertEvent = @"INSERT INTO dbo.ALARM_EVENT
+(RunId, EventSequence, EquipmentId, Cause, EventType, OccurredAtUtc)
+VALUES (@runId, @sequence, 1, 1, @type, SYSUTCDATETIME())";
+                Assert.Equal(1, database.Execute(insertEvent, new { runId, sequence = 1, type = 4 }, transaction));
+                Assert.Equal(547, Assert.Throws<SqlException>(() => database.Execute(insertEvent,
+                    new { runId, sequence = 2, type = 5 }, transaction)).Number);
+                Assert.Equal(515, Assert.Throws<SqlException>(() => database.Execute(@"INSERT INTO dbo.SAMPLE
+(RunId, SequenceNumber, EquipmentId, CollectedAtUtc) VALUES (@runId, 987654321, 1, SYSUTCDATETIME())",
+                    new { runId }, transaction)).Number);
+                transaction.Rollback();
+            }
+        }
+
         private static void AssertMigrationOrder(SqlConnection connection)
         {
             var scripts = new List<string>();
@@ -231,7 +284,8 @@ WHERE RunId = @runId AND SequenceNumber = @sequenceNumber AND EquipmentId = @equ
                 "Data.Migrations.0006_CreateSystem.sql",
                 "Data.Migrations.0007_SeedSystemDemo.sql",
                 "Data.Migrations.0008_SeedFaultCauseCategory.sql",
-                "Data.Migrations.0009_AlterSampleMeasurementsToReal.sql"
+                "Data.Migrations.0009_AlterSampleMeasurementsToReal.sql",
+                "Data.Migrations.0010_AddCollectorRunAndEventLinks.sql"
             }, scripts);
         }
 

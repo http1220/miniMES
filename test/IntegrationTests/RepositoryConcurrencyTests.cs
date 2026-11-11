@@ -45,12 +45,8 @@ namespace IntegrationTests
             try
             {
                 setup.Open();
-                foreach (var script in new[] { "0002_CreateAlarm.sql", "0004_CreateFault.sql", "0005_CreateAppUser.sql" })
-                {
-                    using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream("Data.Migrations." + script))
-                    using (var reader = new StreamReader(stream))
-                        setup.Execute(reader.ReadToEnd());
-                }
+                MigrationRunner.Run(builder.ConnectionString);
+
                 userIds = setup.Query<int>(@"INSERT INTO dbo.APP_USER (Name)
 OUTPUT INSERTED.UserId VALUES (N'작업자 1'), (N'작업자 2')").ToArray();
                 alarmId = setup.QuerySingle<int>(@"INSERT INTO dbo.ALARM (EquipmentId, Cause, RaisedAtUtc)
@@ -141,6 +137,25 @@ UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
                     "SELECT ActionText, Version FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
                 Assert.Equal(texts[winner], stored.ActionText);
                 Assert.Equal(success.Version, stored.Version);
+            });
+        }
+
+        [Fact]
+        public void EnsureRun_ConcurrentRequests_PreservesSingleFirstRegistration()
+        {
+            var repositories = workers.Select(connection => new CollectorRunRepository(connection)).ToArray();
+            Repeat(iteration =>
+            {
+                var runId = Guid.NewGuid();
+                var results = RunPair(i =>
+                {
+                    repositories[i].EnsureRun(runId, times[i]);
+                    return true;
+                });
+                Assert.All(results, result => Assert.True(result));
+                Assert.Equal(1, setup.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.COLLECTOR_RUN WHERE RunId = @runId", new { runId }));
+                var stored = setup.QuerySingle<DateTime>("SELECT StartedAtUtc FROM dbo.COLLECTOR_RUN WHERE RunId = @runId", new { runId });
+                Assert.Contains(stored, times);
             });
         }
 
