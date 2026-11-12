@@ -83,6 +83,15 @@ WHERE FaultId = @faultId", new { faultId }, transaction);
             });
         }
 
+        public FaultTransitionContext GetTransitionContext(int faultId)
+        {
+            return connection.QuerySingleOrDefault<FaultTransitionContext>(@"
+SELECT f.Status, a.RaisedAtUtc AS AlarmRaisedAtUtc
+FROM dbo.FAULT AS f
+INNER JOIN dbo.ALARM AS a ON a.AlarmId = f.AlarmId
+WHERE f.FaultId = @faultId", new { faultId });
+        }
+
         public FaultTransitionResult TransitionFault(int faultId, byte expectedCurrentStatus,
             byte newStatus, int changedByUserId, DateTime nowUtc, string reason, DateTime? recoveredAtUtc)
         {
@@ -114,14 +123,15 @@ WHERE FaultId = @faultId", new { faultId }, transaction);
                     var parameters = new DynamicParameters(new { faultId, expectedCurrentStatus, newStatus, changedByUserId, reason });
                     parameters.Add("nowUtc", nowUtc, DbType.DateTime2);
                     parameters.Add("recoveredAtUtc", recoveredAtUtc, DbType.DateTime2);
-                    var affected = connection.Execute(@"
+                    var version = connection.QuerySingleOrDefault<byte[]>(@"
 UPDATE dbo.FAULT SET Status = @newStatus,
     RecoveredAtUtc = CASE WHEN @newStatus = 3 THEN @recoveredAtUtc
         WHEN Status = 3 THEN NULL ELSE RecoveredAtUtc END,
     ClosedAtUtc = CASE WHEN @newStatus = 3 THEN @nowUtc
         WHEN Status = 3 THEN NULL ELSE ClosedAtUtc END
+OUTPUT inserted.Version
 WHERE FaultId = @faultId AND Status = @expectedCurrentStatus", parameters, transaction);
-                    if (affected == 0)
+                    if (version == null)
                     {
                         var status = connection.QuerySingleOrDefault<byte?>(
                             "SELECT Status FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId }, transaction);
@@ -132,7 +142,7 @@ WHERE FaultId = @faultId AND Status = @expectedCurrentStatus", parameters, trans
 INSERT INTO dbo.FAULT_HISTORY
     (FaultId, ChangedByUserId, ChangedAtUtc, PreviousStatus, NewStatus, Reason)
 VALUES (@faultId, @changedByUserId, @nowUtc, @expectedCurrentStatus, @newStatus, @reason)", parameters, transaction);
-                    return new FaultTransitionResult(FaultTransitionStatus.Success, newStatus);
+                    return new FaultTransitionResult(FaultTransitionStatus.Success, newStatus, version: version);
                 });
             }
             catch (SqlException error) when ((error.Number == 2601 || error.Number == 2627)
