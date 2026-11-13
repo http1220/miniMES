@@ -205,6 +205,20 @@ WHERE AlarmId = @alarmId AND AcknowledgedAtUtc IS NULL AND AcknowledgedBy IS NUL
         }
 
         [Fact]
+        public void ApplyEvents_ClearForMissingEquipment_ThrowsAndPreservesEventCount()
+        {
+            var item = NewEvent(1, 2);
+            item.EquipmentId = 999;
+            var eventCount = connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM_EVENT");
+
+            var exception = Assert.Throws<SqlException>(() => new AlarmRepository(connection)
+                .ApplyEvents(new[] { item }));
+
+            Assert.Equal(547, exception.Number);
+            Assert.Equal(eventCount, connection.ExecuteScalar<int>("SELECT COUNT(*) FROM dbo.ALARM_EVENT"));
+        }
+
+        [Fact]
         public void ApplyEvents_InvalidCauseInMiddle_RollsBackWholeBatch()
         {
             var invalid = NewEvent(2, 1);
