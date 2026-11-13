@@ -309,6 +309,98 @@ OUTPUT INSERTED.FaultId VALUES (@alarmId, 1, @nowUtc, 1)", new { alarmId, nowUtc
             Assert.Throws<ArgumentException>(() => repository.UpdateTexts(faultId, new byte[7], 1, null, null));
         }
 
+        [Fact]
+        public void TransitionFault_Success_ReturnsStoredVersionUsableForTextUpdate()
+        {
+            var repository = new FaultRepository(connection);
+
+            var result = repository.TransitionFault(faultId, 1, 2, userId, nowUtc, null, null);
+
+            Assert.Equal(FaultTransitionStatus.Success, result.Status);
+            Assert.NotNull(result.Version);
+            Assert.Equal(8, result.Version.Length);
+            Assert.Equal(ReadActionText().Version, result.Version);
+            Assert.Equal(FaultTextsUpdateStatus.Success,
+                repository.UpdateTexts(faultId, result.Version, 2, "cause", "action").Status);
+        }
+
+        [Fact]
+        public void TransitionFault_RegistrationVersion_ConflictsWithTextUpdateAfterTransition()
+        {
+            var repository = new FaultRepository(connection);
+            repository.TransitionFault(faultId, 1, 4, userId, nowUtc, "cancel", null);
+            var registered = repository.RegisterFault(alarmId, 1, null, null, nowUtc);
+            Assert.Equal(FaultRegisterStatus.Success, registered.Status);
+            var id = registered.FaultId.Value;
+
+            var transition = repository.TransitionFault(id, 1, 2, userId, nowUtc, null, null);
+            var update = repository.UpdateTexts(id, registered.Version, 2, "stale cause", "stale action");
+
+            Assert.Equal(FaultTransitionStatus.Success, transition.Status);
+            Assert.Equal(FaultTextsUpdateStatus.Conflict, update.Status);
+            Assert.NotEqual(registered.Version, update.Version);
+            Assert.Null(update.CauseText);
+            Assert.Null(update.ActionText);
+        }
+
+        [Fact]
+        public void TransitionFault_Failures_ReturnNullVersion()
+        {
+            var repository = new FaultRepository(connection);
+            var mismatch = repository.TransitionFault(faultId, 2, 4, userId, nowUtc, null, null);
+            Assert.Equal(FaultTransitionStatus.StatusMismatch, mismatch.Status);
+            Assert.Null(mismatch.Version);
+            var missing = repository.TransitionFault(-1, 1, 2, userId, nowUtc, null, null);
+            Assert.Equal(FaultTransitionStatus.NotFound, missing.Status);
+            Assert.Null(missing.Version);
+            Assert.Equal(FaultTransitionStatus.Success,
+                repository.TransitionFault(faultId, 1, 4, userId, nowUtc, "cancel", null).Status);
+            Assert.Equal(FaultRegisterStatus.Success,
+                repository.RegisterFault(alarmId, 1, null, null, nowUtc).Status);
+
+            var conflict = repository.TransitionFault(faultId, 4, 1, userId, nowUtc, "restore", null);
+
+            Assert.Equal(FaultTransitionStatus.ActiveFaultExists, conflict.Status);
+            Assert.Null(conflict.Version);
+        }
+
+        [Fact]
+        public void GetTransitionContext_ReturnsAlarmRaisedTimeAndCurrentStatusAfterTransition()
+        {
+            var raisedAt = nowUtc.AddMinutes(-5).AddMilliseconds(123);
+            var registeredAt = nowUtc.AddMilliseconds(456);
+            var parameters = new DynamicParameters();
+            parameters.Add("raisedAt", raisedAt, System.Data.DbType.DateTime2);
+            var id = connection.QuerySingle<int>(@"
+INSERT INTO dbo.ALARM (EquipmentId, Cause, RaisedAtUtc)
+OUTPUT inserted.AlarmId VALUES (1, 2, @raisedAt)", parameters);
+            var repository = new FaultRepository(connection);
+            var registered = repository.RegisterFault(id, 1, null, null, registeredAt);
+            Assert.Equal(FaultRegisterStatus.Success, registered.Status);
+            var contextFaultId = registered.FaultId.Value;
+            Assert.Equal(registeredAt, connection.QuerySingle<DateTime>(
+                "SELECT RegisteredAtUtc FROM dbo.FAULT WHERE FaultId = @contextFaultId", new { contextFaultId }));
+
+            var context = repository.GetTransitionContext(contextFaultId);
+
+            Assert.NotNull(context);
+            Assert.Equal((byte)1, context.Status);
+            Assert.Equal(raisedAt, context.AlarmRaisedAtUtc);
+            Assert.NotEqual(registeredAt, context.AlarmRaisedAtUtc);
+            Assert.Equal(FaultTransitionStatus.Success,
+                repository.TransitionFault(contextFaultId, 1, 2, userId, nowUtc, null, null).Status);
+            var changed = repository.GetTransitionContext(contextFaultId);
+            Assert.NotNull(changed);
+            Assert.Equal((byte)2, changed.Status);
+            Assert.Equal(raisedAt, changed.AlarmRaisedAtUtc);
+        }
+
+        [Fact]
+        public void GetTransitionContext_MissingFault_ReturnsNull()
+        {
+            Assert.Null(new FaultRepository(connection).GetTransitionContext(-1));
+        }
+
         private void AssertTimes(DateTime? recovered, DateTime? closed)
         {
             var stored = connection.QuerySingle<FaultTimes>("SELECT RecoveredAtUtc, ClosedAtUtc FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId });
