@@ -26,6 +26,7 @@ namespace IntegrationTests
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Temperature REAL NULL;")]
         [InlineData("Data.Migrations.0009_AlterSampleMeasurementsToReal.sql", "ALTER TABLE dbo.SAMPLE ALTER COLUMN Vibration REAL NULL;")]
         [InlineData("Data.Migrations.0010_AddCollectorRunAndEventLinks.sql", "CREATE TABLE dbo.COLLECTOR_RUN")]
+        [InlineData("Data.Migrations.0012_AddAlarmEventEquipmentForeignKey.sql", "FK_ALARM_EVENT_EQUIPMENT")]
         public void Assembly_ContainsMigration(string resourceName, string expectedSql)
         {
             using (var stream = typeof(MigrationRunner).Assembly.GetManifestResourceStream(
@@ -232,6 +233,7 @@ WHERE i.object_id = OBJECT_ID('dbo.COLLECTOR_RUN') AND i.is_primary_key = 1 AND 
                 new[] { "ALARM_EVENT", "COLLECTOR_RUN", "RunId", "RunId" },
                 new[] { "SAMPLE", "EQUIPMENT", "EquipmentId", "EquipmentId" },
                 new[] { "ALARM", "EQUIPMENT", "EquipmentId", "EquipmentId" },
+                new[] { "ALARM_EVENT", "EQUIPMENT", "EquipmentId", "EquipmentId" },
                 new[] { "ALARM_EVENT", "ALARM", "AlarmId", "AlarmId" }
             })
             {
@@ -314,7 +316,8 @@ AND COL_NAME(fc.referenced_object_id, fc.referenced_column_id) = 'UserId'"));
                 "Data.Migrations.0008_SeedFaultCauseCategory.sql",
                 "Data.Migrations.0009_AlterSampleMeasurementsToReal.sql",
                 "Data.Migrations.0010_AddCollectorRunAndEventLinks.sql",
-                "Data.Migrations.0011_AlignFaultWithErd.sql"
+                "Data.Migrations.0011_AlignFaultWithErd.sql",
+                "Data.Migrations.0012_AddAlarmEventEquipmentForeignKey.sql"
             }, scripts);
         }
 
