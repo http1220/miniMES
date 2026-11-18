@@ -12,6 +12,7 @@ using Xunit;
 
 namespace IntegrationTests
 {
+    [Collection("SharedLocalResources")]
     public sealed class ServerSkeletonTests
     {
         private static string ConnectionString()

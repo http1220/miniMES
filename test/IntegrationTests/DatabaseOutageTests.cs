@@ -20,6 +20,7 @@ using Xunit.Abstractions;
 
 namespace IntegrationTests
 {
+    [Collection("SharedLocalResources")]
     [Trait("Category", "Toxiproxy")]
     public sealed class DatabaseOutageTests : IDisposable
     {
