@@ -26,6 +26,7 @@ dotnet test test/UnitTests/UnitTests.csproj
 ```
 
 통합 테스트(`test/IntegrationTests`)는 외부 SQL Server가 필요해 로컬에서만 실행합니다.
+DB 연결 단절 시험(Toxiproxy 필요)은 [docs/fault-injection.md](docs/fault-injection.md)를 참고하세요.
 
 ## 실행
 
