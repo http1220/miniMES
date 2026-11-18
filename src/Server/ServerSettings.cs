@@ -37,7 +37,12 @@ namespace Server
             var connection = Required(values, "DB_CONNECTION_STRING", errors);
             if (connection != null)
             {
-                try { new SqlConnectionStringBuilder(connection); }
+                try
+                {
+                    var builder = new SqlConnectionStringBuilder(connection);
+                    builder.PoolBlockingPeriod = PoolBlockingPeriod.NeverBlock;
+                    connection = builder.ConnectionString;
+                }
                 catch (Exception) { errors.Add("DB_CONNECTION_STRING must be a valid SQL connection string."); }
             }
             settings = new ServerSettings
