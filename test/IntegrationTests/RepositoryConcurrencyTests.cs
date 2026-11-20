@@ -179,7 +179,7 @@ UPDATE dbo.FAULT SET Status = 1 WHERE FaultId = @faultId", new { faultId });
                 }
                 finally
                 {
-                    output.WriteLine("Iteration {0}: empty active-fault lookups = {1}; two empty lookups prove overlap before insert.",
+                    output.WriteLine("Iteration {0}: empty active-fault lookups = {1}; expected exactly one because the competing lookup waits for the first insert.",
                         iteration, observed.Sum(worker => worker.EmptyActiveReads) - before);
                 }
                 Assert.Equal(1, observed.Sum(worker => worker.EmptyActiveReads) - before);
