@@ -113,12 +113,14 @@ WHERE f.FaultId = @faultId", new { faultId });
                     if (expectedCurrentStatus == 4 && newStatus == 1)
                     {
                         var active = FindActiveFault(alarmId.Value, faultId, transaction, true);
-                        var status = connection.QuerySingle<byte>(
+                        var status = connection.QuerySingleOrDefault<byte?>(
                             "SELECT Status FROM dbo.FAULT WHERE FaultId = @faultId", new { faultId }, transaction);
-                        if (status != expectedCurrentStatus)
-                            return new FaultTransitionResult(FaultTransitionStatus.StatusMismatch, status);
+                        if (!status.HasValue)
+                            return new FaultTransitionResult(FaultTransitionStatus.NotFound);
+                        if (status.Value != expectedCurrentStatus)
+                            return new FaultTransitionResult(FaultTransitionStatus.StatusMismatch, status.Value);
                         if (active.HasValue)
-                            return new FaultTransitionResult(FaultTransitionStatus.ActiveFaultExists, status, active);
+                            return new FaultTransitionResult(FaultTransitionStatus.ActiveFaultExists, status.Value, active);
                     }
                     var parameters = new DynamicParameters(new { faultId, expectedCurrentStatus, newStatus, changedByUserId, reason });
                     parameters.Add("nowUtc", nowUtc, DbType.DateTime2);
