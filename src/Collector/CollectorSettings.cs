@@ -23,11 +23,20 @@ namespace Collector
         public double BackoffMaximumJitterFraction { get; }
         public int SampleBufferCapacity { get; }
         public int AlarmQueueCapacity { get; }
+        public TimeSpan HeartbeatInterval { get; }
+        public TimeSpan ServerStoppedTimeout { get; }
+        public TimeSpan HttpRequestTimeout { get; }
+        public TimeSpan ShutdownTimeout { get; }
+        public TimeSpan ClockJumpThreshold { get; }
+        public Uri ServerBaseUrl { get; }
+        public string ApiKey { get; }
         public string LogDirectory { get; }
         public EquipmentSettings[] Equipment => (EquipmentSettings[])equipment.Clone();
 
         private CollectorSettings(int poll, int read, int judge, int fault, int recovery, int consecutive,
-            int backoff, decimal jitter, int samples, int alarms, string logDirectory, EquipmentSettings[] equipment)
+            int backoff, decimal jitter, int samples, int alarms, string logDirectory, EquipmentSettings[] equipment,
+            int heartbeat, int serverStopped, int httpTimeout, int shutdownTimeout, int clockJump, Uri serverBaseUrl,
+            string apiKey)
         {
             PollInterval = TimeSpan.FromMilliseconds(poll);
             ReadTimeout = TimeSpan.FromMilliseconds(read);
@@ -39,6 +48,13 @@ namespace Collector
             BackoffMaximumJitterFraction = (double)jitter;
             SampleBufferCapacity = samples;
             AlarmQueueCapacity = alarms;
+            HeartbeatInterval = TimeSpan.FromMilliseconds(heartbeat);
+            ServerStoppedTimeout = TimeSpan.FromSeconds(serverStopped);
+            HttpRequestTimeout = TimeSpan.FromMilliseconds(httpTimeout);
+            ShutdownTimeout = TimeSpan.FromMilliseconds(shutdownTimeout);
+            ClockJumpThreshold = TimeSpan.FromMilliseconds(clockJump);
+            ServerBaseUrl = serverBaseUrl;
+            ApiKey = apiKey;
             LogDirectory = logDirectory;
             this.equipment = equipment;
         }
@@ -49,6 +65,13 @@ namespace Collector
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var key in source.AllKeys)
                 values.Add(key, source[key]);
+
+            var envPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env");
+            if (File.Exists(envPath))
+            {
+                foreach (var entry in EnvFile.Parse(File.ReadAllLines(envPath)))
+                    values[entry.Key] = entry.Value;
+            }
 
             var errors = Validate(values, out var settings);
             if (errors.Count != 0)
@@ -69,6 +92,21 @@ namespace Collector
             var samples = Integer(values, errors, "SampleBufferCapacity", 3000, 1);
             var alarms = Integer(values, errors, "AlarmQueueCapacity", 3000, 1);
             var jitter = Jitter(values, errors);
+            var heartbeat = Integer(values, errors, "HeartbeatIntervalMilliseconds", 2000, 1);
+            var serverStopped = Integer(values, errors, "ServerStoppedSeconds", 10, 1);
+            var httpTimeout = Integer(values, errors, "HttpRequestTimeoutMilliseconds", 5000, 1);
+            var shutdownTimeout = Integer(values, errors, "ShutdownTimeoutMilliseconds", 10000, 1);
+            var clockJump = Integer(values, errors, "ClockJumpThresholdMilliseconds", 1000, 1);
+            if (heartbeat >= serverStopped * 1000L)
+                errors.Add("HeartbeatIntervalMilliseconds must be less than ServerStoppedSeconds × 1000.");
+
+            var urlText = Get(values, "SERVER_BASE_URL", null);
+            if (!Uri.TryCreate(urlText, UriKind.Absolute, out var serverBaseUrl)
+                || serverBaseUrl.Scheme != Uri.UriSchemeHttps || string.IsNullOrEmpty(serverBaseUrl.Host))
+                errors.Add("SERVER_BASE_URL must be an absolute HTTPS URI with a host.");
+            var apiKey = Get(values, "COLLECTOR_API_KEY", null);
+            if (string.IsNullOrWhiteSpace(apiKey) || apiKey.Length < 32)
+                errors.Add("COLLECTOR_API_KEY must contain at least 32 characters and must not be blank.");
             if (read >= poll)
                 errors.Add("ReadTimeoutMilliseconds must be less than PollIntervalMilliseconds.");
             if (poll >= fault)
@@ -88,7 +126,9 @@ namespace Collector
 
             settings = errors.Count == 0
                 ? new CollectorSettings(poll.Value, read.Value, judge.Value, fault.Value, recovery.Value,
-                    consecutive.Value, backoff.Value, jitter.Value, samples.Value, alarms.Value, logDirectory, equipment)
+                    consecutive.Value, backoff.Value, jitter.Value, samples.Value, alarms.Value, logDirectory, equipment,
+                    heartbeat.Value, serverStopped.Value, httpTimeout.Value, shutdownTimeout.Value, clockJump.Value,
+                    serverBaseUrl, apiKey)
                 : null;
             return errors;
         }

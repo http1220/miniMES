@@ -93,7 +93,11 @@ try {
     $simulatorExe = (Resolve-Path -LiteralPath $SimulatorExecutable).Path
     $originalCollector = (Resolve-Path -LiteralPath $CollectorExecutable).Path
     [void][IO.Directory]::CreateDirectory($copyDirectory)
-    Copy-Item -Path (Join-Path (Split-Path -Parent $originalCollector) '*') -Destination $copyDirectory -Recurse
+    Copy-Item -Path (Join-Path (Split-Path -Parent $originalCollector) '*') -Destination $copyDirectory -Recurse -Exclude '.env'
+    Set-Content -LiteralPath (Join-Path $copyDirectory '.env') -Encoding Ascii -Value @(
+        'SERVER_BASE_URL=https://localhost:5443'
+        'COLLECTOR_API_KEY=change-me-change-me-change-me-0001'
+    )
     $collectorExe = Join-Path $copyDirectory (Split-Path -Leaf $originalCollector)
     $configPath = "$collectorExe.config"
     $config = [xml]::new()
