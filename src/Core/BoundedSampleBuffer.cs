@@ -30,6 +30,27 @@ namespace Core
             items.Enqueue(item);
         }
 
+        public int RemoveWhere(Predicate<T> match)
+        {
+            if (match == null)
+            {
+                throw new ArgumentNullException(nameof(match));
+            }
+
+            var remaining = new Queue<T>();
+            foreach (T item in items)
+            {
+                if (!match(item))
+                {
+                    remaining.Enqueue(item);
+                }
+            }
+
+            int removed = items.Count - remaining.Count;
+            items = remaining;
+            return removed;
+        }
+
         public T[] GetSnapshot()
         {
             return items.ToArray();

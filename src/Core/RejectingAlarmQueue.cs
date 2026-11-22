@@ -22,14 +22,40 @@ namespace Core
 
         public void Add(T item)
         {
+            TryAdd(item);
+        }
+
+        public bool TryAdd(T item)
+        {
             if(items.Count >= this.capacity)
             {
                 RejectedCount++;
-                return;
+                return false;
             }
 
             items.Enqueue(item);
+            return true;
+        }
 
+        public int RemoveWhere(Predicate<T> match)
+        {
+            if (match == null)
+            {
+                throw new ArgumentNullException(nameof(match));
+            }
+
+            var remaining = new Queue<T>();
+            foreach (T item in items)
+            {
+                if (!match(item))
+                {
+                    remaining.Enqueue(item);
+                }
+            }
+
+            int removed = items.Count - remaining.Count;
+            items = remaining;
+            return removed;
         }
 
         public T[] GetSnapshot()

@@ -9,8 +9,15 @@ namespace Modbus
         public ModbusFailureType? FailureType {get;}
         public byte? ExceptionCode {get;}
 
+        public TimeSpan? ReceivedAt { get; }
+
         public ModbusReadResult(byte[] data , ModbusFailureType? failureType, byte? exceptionCode)
-        {   
+            : this(data, failureType, exceptionCode, receivedAt: null)
+        {
+        }
+
+        public ModbusReadResult(byte[] data, ModbusFailureType? failureType, byte? exceptionCode, TimeSpan? receivedAt)
+        {
             if(data != null && failureType.HasValue)
             {
                 throw new ArgumentException("성공 데이터와 실패 유형을 동시에 지정할 수 없음");
@@ -28,6 +35,12 @@ namespace Modbus
                 throw new ArgumentException("failureType이 DeviceException이 아닌데 exceptionCode가 있으면 거부");
             }
 
+            if (data == null && receivedAt.HasValue)
+            {
+                throw new ArgumentException("실패 결과에 수신 시각을 지정할 수 없음", nameof(receivedAt));
+            }
+
+            ReceivedAt = receivedAt;
             this.Data=data;
             this.FailureType=failureType;
             this.ExceptionCode=exceptionCode;
