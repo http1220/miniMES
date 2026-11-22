@@ -69,6 +69,21 @@ namespace Collector
                 return equipment[equipmentId].Communication.CheckTimeout(now, timeout);
         }
 
+        // Detection and submission happen under one lock hold so a clear can never overtake its raise.
+        public SubmitResult OnValidResponseAndSubmit(int equipmentId, TimeSpan now)
+        {
+            lock (gate)
+                return SubmitAlarm(equipmentId, AlarmCause.Communication,
+                    equipment[equipmentId].Communication.OnValidResponse(now), now);
+        }
+
+        public SubmitResult CheckCommunicationTimeoutAndSubmit(int equipmentId, TimeSpan now, TimeSpan timeout)
+        {
+            lock (gate)
+                return SubmitAlarm(equipmentId, AlarmCause.Communication,
+                    equipment[equipmentId].Communication.CheckTimeout(now, timeout), now);
+        }
+
         public AlarmEvent UpdateTemperature(int equipmentId, float value, float upperLimit)
         {
             lock (gate)
@@ -129,6 +144,12 @@ namespace Collector
                 alarmCount += moved;
                 return moved;
             }
+        }
+
+        public long LastSampleSequence(int equipmentId)
+        {
+            lock (gate)
+                return equipment[equipmentId].SampleSequence;
         }
 
         public SampleItem[] GetSampleSnapshot()

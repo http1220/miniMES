@@ -186,6 +186,48 @@ namespace UnitTests
                 state.GetAlarmSnapshot().Select(item => item.EventSequence));
         }
 
+        [Fact]
+        public void CommunicationAlarm_ConcurrentDetectionAndRecovery_KeepsRaisedBeforeCleared()
+        {
+            var state = new CollectorState(Guid.Empty, new[] { 1 }, 8, 100000, 1, 2);
+            var timeout = TimeSpan.FromSeconds(5);
+            state.OnValidResponseAndSubmit(1, TimeSpan.Zero);
+
+            var judge = Task.Run(() =>
+            {
+                for (var i = 0; i < 20000; i++)
+                    state.CheckCommunicationTimeoutAndSubmit(1, timeout, timeout);
+            });
+            var equipment = Task.Run(() =>
+            {
+                for (var i = 0; i < 20000; i++)
+                    state.OnValidResponseAndSubmit(1, TimeSpan.Zero);
+            });
+            Task.WaitAll(judge, equipment);
+
+            var types = state.GetAlarmSnapshot().Select(item => item.EventType).ToArray();
+            Assert.NotEmpty(types);
+            for (var i = 0; i < types.Length; i++)
+                Assert.Equal(i % 2 == 0 ? AlarmEventType.Raised : AlarmEventType.Cleared, types[i]);
+        }
+
+        [Fact]
+        public void CheckCommunicationTimeoutAndSubmit_ThenRecovery_QueuesRaisedThenCleared()
+        {
+            var state = CreateState();
+            var timeout = TimeSpan.FromSeconds(5);
+            Assert.Equal(SubmitOutcome.Ignored, state.OnValidResponseAndSubmit(1, TimeSpan.Zero).Outcome);
+
+            var raised = state.CheckCommunicationTimeoutAndSubmit(1, timeout, timeout);
+            Assert.Equal(SubmitOutcome.Queued, raised.Outcome);
+            Assert.Equal(AlarmEventType.Raised, raised.Item.EventType);
+            Assert.Equal(SubmitOutcome.Ignored, state.CheckCommunicationTimeoutAndSubmit(1, timeout, timeout).Outcome);
+            Assert.Equal(SubmitOutcome.Ignored, state.OnValidResponseAndSubmit(1, timeout).Outcome);
+            var cleared = state.OnValidResponseAndSubmit(1, timeout);
+            Assert.Equal(AlarmEventType.Cleared, cleared.Item.EventType);
+            Assert.Equal(raised.Item.EventSequence + 1, cleared.Item.EventSequence);
+        }
+
         private static CollectorState CreateState(int sampleCapacity = 8, int alarmCapacity = 8)
         {
             return new CollectorState(Guid.Empty, new[] { 1, 2 }, sampleCapacity, alarmCapacity, 2, 2);

@@ -11,7 +11,8 @@ namespace Collector
     {
         Started, ConfigurationInvalid, PollFailed, SampleStored, SampleBufferDropped,
         AlarmQueueRejected, AlarmUnsentHeld, AlarmUnsentCancelled, AlarmUnsentRequeued,
-        AlarmRaised, AlarmCleared, StatusReported, ReceiveDelay, ExceptionObserved
+        AlarmRaised, AlarmCleared, StatusReported, ReceiveDelay, ExceptionObserved,
+        PollRecovered, StatusSnapshot
     }
 
     public sealed class CollectorLog : IDisposable
