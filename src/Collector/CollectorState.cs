@@ -164,6 +164,12 @@ namespace Collector
                 return alarms.GetSnapshot();
         }
 
+        public AlarmEventItem[] GetUnsentSnapshot()
+        {
+            lock (gate)
+                return unsent.GetSnapshot();
+        }
+
         public int RemoveSamples(ISet<(int EquipmentId, long SequenceNumber)> keys)
         {
             var removalKeys = new HashSet<(int EquipmentId, long SequenceNumber)>(keys);

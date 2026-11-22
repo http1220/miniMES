@@ -39,6 +39,18 @@ namespace Collector
             Count++;
         }
 
+        internal AlarmEventItem[] GetSnapshot()
+        {
+            var snapshot = new AlarmEventItem[Count];
+            var index = 0;
+            foreach (var list in events.Values)
+            {
+                list.CopyTo(snapshot, index);
+                index += list.Count;
+            }
+            return snapshot;
+        }
+
         internal int Requeue(RejectingAlarmQueue<AlarmEventItem> queue, int freeSlots)
         {
             var emptied = new List<(int EquipmentId, AlarmCause Cause)>();
