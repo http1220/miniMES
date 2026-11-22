@@ -9,15 +9,28 @@ namespace Core
 
         private int consecutiveSuccessCount;
 
+        private readonly int recoverySuccessCount;
+
+        public CommunicationAlarmDetector() : this(3)
+        {
+        }
+
+        public CommunicationAlarmDetector(int recoverySuccessCount)
+        {
+            if (recoverySuccessCount < 1)
+                throw new ArgumentOutOfRangeException(nameof(recoverySuccessCount));
+            this.recoverySuccessCount = recoverySuccessCount;
+        }
+
         public AlarmEvent OnValidResponse(TimeSpan now)
         {
             lastValidResponseTime = now;
-            if(consecutiveSuccessCount < 3)
+            if(consecutiveSuccessCount < recoverySuccessCount)
             {
                 consecutiveSuccessCount++;
             }
 
-            if(consecutiveSuccessCount >= 3 && isAlarmActive)
+            if(consecutiveSuccessCount >= recoverySuccessCount && isAlarmActive)
             {
                 isAlarmActive = false;
                 return AlarmEvent.Cleared;

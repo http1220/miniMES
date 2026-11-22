@@ -1,3 +1,5 @@
+using System;
+
 namespace Core
 {
     public class ThresholdAlarmDetector
@@ -5,6 +7,19 @@ namespace Core
         private int consecutiveExceededCount;
         private int consecutiveNormalCount;
         private bool isAlarmActive;
+
+        private readonly int consecutiveCount;
+
+        public ThresholdAlarmDetector() : this(3)
+        {
+        }
+
+        public ThresholdAlarmDetector(int consecutiveCount)
+        {
+            if (consecutiveCount < 1)
+                throw new ArgumentOutOfRangeException(nameof(consecutiveCount));
+            this.consecutiveCount = consecutiveCount;
+        }
 
         public AlarmEvent Update(float value, float upperLimit)
         {
@@ -16,10 +31,10 @@ namespace Core
 
             if (value > upperLimit)
             {
-                consecutiveExceededCount = consecutiveExceededCount < 3 ? consecutiveExceededCount + 1 : 3;
+                consecutiveExceededCount = consecutiveExceededCount < consecutiveCount ? consecutiveExceededCount + 1 : consecutiveCount;
                 consecutiveNormalCount = 0;
 
-                if (consecutiveExceededCount >= 3 && !isAlarmActive)
+                if (consecutiveExceededCount >= consecutiveCount && !isAlarmActive)
                 {
                     isAlarmActive = true;
                     return AlarmEvent.Raised;
@@ -27,10 +42,10 @@ namespace Core
             }
             else
             {
-                consecutiveNormalCount = consecutiveNormalCount < 3 ? consecutiveNormalCount + 1 : 3;
+                consecutiveNormalCount = consecutiveNormalCount < consecutiveCount ? consecutiveNormalCount + 1 : consecutiveCount;
                 consecutiveExceededCount = 0;
 
-                if (consecutiveNormalCount >= 3 && isAlarmActive)
+                if (consecutiveNormalCount >= consecutiveCount && isAlarmActive)
                 {
                     isAlarmActive = false;
                     return AlarmEvent.Cleared;
