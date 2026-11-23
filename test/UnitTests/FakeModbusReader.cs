@@ -86,7 +86,16 @@ namespace UnitTests
 
         internal CollectorLoopTestContext(Dictionary<string, string> overrides = null)
         {
-            var values = overrides ?? new Dictionary<string, string>();
+            var values = new Dictionary<string, string>
+            {
+                ["SERVER_BASE_URL"] = "https://change-me:5443",
+                ["COLLECTOR_API_KEY"] = "change-me-change-me-change-me-0001"
+            };
+            if (overrides != null)
+            {
+                foreach (var entry in overrides)
+                    values[entry.Key] = entry.Value;
+            }
             Assert.Empty(CollectorSettings.Validate(values, out var settings));
             Settings = settings;
             State = new CollectorState(Guid.NewGuid(), Settings.Equipment.Select(device => device.Id),

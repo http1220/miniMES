@@ -10,6 +10,9 @@ namespace UnitTests
 {
     public class CollectorSettingsTests
     {
+        private const string TestServerUrl = "https://change-me:5443";
+        private const string TestApiKey = "change-me-change-me-change-me-01";
+
         [Fact]
         public void Validate_DefaultConfiguration_ConvertsSettings()
         {
@@ -25,7 +28,9 @@ namespace UnitTests
                 ["BackoffMaximumJitterFraction"] = "0.2",
                 ["SampleBufferCapacity"] = "3000",
                 ["AlarmQueueCapacity"] = "3000",
-                ["LogDirectory"] = ""
+                ["LogDirectory"] = "",
+                ["SERVER_BASE_URL"] = TestServerUrl,
+                ["COLLECTOR_API_KEY"] = TestApiKey
             };
             for (var id = 1; id <= 5; id++)
             {
@@ -91,7 +96,8 @@ namespace UnitTests
         [InlineData("JudgeIntervalMilliseconds", "0", "JudgeIntervalMilliseconds")]
         public void Validate_SingleViolation_ReturnsKey(string key, string value, string expectedKey)
         {
-            var values = new Dictionary<string, string> { [key] = value };
+            var values = ValidServerSettings();
+            values[key] = value;
             if (key == "BackoffMaximumMilliseconds" && value == "14001")
                 values["BackoffMaximumJitterFraction"] = "0";
 
@@ -123,8 +129,10 @@ namespace UnitTests
         [InlineData("Equipment.1.VibrationUpperLimit", "100")]
         public void Validate_InclusiveBoundary_Accepts(string key, string value)
         {
-            Assert.Empty(CollectorSettings.Validate(
-                new Dictionary<string, string> { [key] = value }, out var settings));
+            var values = ValidServerSettings();
+            values[key] = value;
+
+            Assert.Empty(CollectorSettings.Validate(values, out var settings));
             Assert.NotNull(settings);
         }
 
@@ -136,7 +144,9 @@ namespace UnitTests
                 ["SampleBufferCapacity"] = "0",
                 ["JudgeIntervalMilliseconds"] = "-1",
                 ["Equipment.2.WordOrder"] = "BADC",
-                ["Equipment.4.Port"] = "65536"
+                ["Equipment.4.Port"] = "65536",
+                ["SERVER_BASE_URL"] = TestServerUrl,
+                ["COLLECTOR_API_KEY"] = TestApiKey
             }, out var settings);
 
             Assert.Equal(4, errors.Count);
@@ -153,11 +163,152 @@ namespace UnitTests
                 ["CommunicationFaultMilliseconds"] = "100",
                 ["BackoffMaximumMilliseconds"] = "1000",
                 ["Equipment.2.Port"] = "15021",
-                ["Equipment.2.Host"] = "localhost"
+                ["Equipment.2.Host"] = "localhost",
+                ["SERVER_BASE_URL"] = TestServerUrl,
+                ["COLLECTOR_API_KEY"] = TestApiKey
             };
             Assert.Empty(CollectorSettings.Validate(values, out var settings));
             Assert.Equal(TimeSpan.FromMilliseconds(20), settings.PollInterval);
             Assert.Equal("localhost", settings.Equipment[1].Host);
+        }
+
+        [Fact]
+        public void Validate_NewDefaults_ConvertsTimeoutsAndServerSettings()
+        {
+            Assert.Equal(32, TestApiKey.Length);
+            Assert.Empty(CollectorSettings.Validate(ValidServerSettings(), out var settings));
+
+            Assert.Equal(TimeSpan.FromMilliseconds(2000), settings.HeartbeatInterval);
+            Assert.Equal(TimeSpan.FromSeconds(10), settings.ServerStoppedTimeout);
+            Assert.Equal(TimeSpan.FromMilliseconds(5000), settings.HttpRequestTimeout);
+            Assert.Equal(TimeSpan.FromMilliseconds(10000), settings.ShutdownTimeout);
+            Assert.Equal(TimeSpan.FromMilliseconds(1000), settings.ClockJumpThreshold);
+            Assert.Equal(new Uri(TestServerUrl), settings.ServerBaseUrl);
+            Assert.Equal(TestApiKey, settings.ApiKey);
+            Assert.DoesNotContain(TestApiKey, settings.ToString());
+        }
+
+        [Theory]
+        [InlineData((string)null)]
+        [InlineData(" ")]
+        [InlineData("http://change-me:5443")]
+        [InlineData("/relative")]
+        [InlineData("https://:5443")]
+        public void Validate_InvalidServerBaseUrl_ReturnsKeyWithoutValue(string url)
+        {
+            var values = ValidServerSettings();
+            values.Remove("SERVER_BASE_URL");
+            if (url != null)
+                values["SERVER_BASE_URL"] = url;
+
+            var errors = CollectorSettings.Validate(values, out var settings);
+
+            Assert.Null(settings);
+            var error = Assert.Single(errors);
+            Assert.Contains("SERVER_BASE_URL", error);
+            if (!string.IsNullOrWhiteSpace(url))
+                Assert.DoesNotContain(url, error);
+        }
+
+        [Theory]
+        [InlineData((string)null)]
+        [InlineData(" ")]
+        [InlineData("change-me-change-me-change-me-0")]
+        public void Validate_MissingBlankOrShortApiKey_ReturnsKey(string apiKey)
+        {
+            var values = ValidServerSettings();
+            values.Remove("COLLECTOR_API_KEY");
+            if (apiKey != null)
+                values["COLLECTOR_API_KEY"] = apiKey;
+
+            var errors = CollectorSettings.Validate(values, out var settings);
+
+            Assert.Null(settings);
+            var error = Assert.Single(errors);
+            Assert.Contains("COLLECTOR_API_KEY", error);
+            if (!string.IsNullOrWhiteSpace(apiKey))
+                Assert.DoesNotContain(apiKey, error);
+        }
+
+        [Theory]
+        [InlineData("HeartbeatIntervalMilliseconds")]
+        [InlineData("ServerStoppedSeconds")]
+        [InlineData("HttpRequestTimeoutMilliseconds")]
+        [InlineData("ShutdownTimeoutMilliseconds")]
+        [InlineData("ClockJumpThresholdMilliseconds")]
+        public void Validate_NewNumericSettings_RejectZeroAndAcceptOne(string key)
+        {
+            var values = ValidServerSettings();
+            values["HeartbeatIntervalMilliseconds"] = "1";
+            values[key] = "0";
+
+            Assert.Contains(key, Assert.Single(CollectorSettings.Validate(values, out var invalid)));
+            Assert.Null(invalid);
+
+            values[key] = "1";
+            Assert.Empty(CollectorSettings.Validate(values, out var valid));
+            Assert.NotNull(valid);
+        }
+
+        [Theory]
+        [InlineData("9999", true)]
+        [InlineData("10000", false)]
+        [InlineData("12000", false)]
+        public void Validate_HeartbeatMustBeStrictlyShorterThanStoppedTimeout(string heartbeat, bool accepted)
+        {
+            var values = ValidServerSettings();
+            values["ServerStoppedSeconds"] = "10";
+            values["HeartbeatIntervalMilliseconds"] = heartbeat;
+
+            var errors = CollectorSettings.Validate(values, out var settings);
+
+            if (accepted)
+            {
+                Assert.Empty(errors);
+                Assert.Equal(TimeSpan.FromMilliseconds(9999), settings.HeartbeatInterval);
+            }
+            else
+            {
+                Assert.Null(settings);
+                var error = Assert.Single(errors);
+                Assert.Contains("HeartbeatIntervalMilliseconds", error);
+                Assert.Contains("ServerStoppedSeconds", error);
+            }
+        }
+
+        [Fact]
+        public void Validate_NewViolations_AccumulatesErrorsWithoutValues()
+        {
+            const string invalidUrl = "http://change-me:5443/private";
+            const string shortKey = "change-me-short";
+            var values = ValidServerSettings();
+            values["SERVER_BASE_URL"] = invalidUrl;
+            values["COLLECTOR_API_KEY"] = shortKey;
+            values["HeartbeatIntervalMilliseconds"] = "10000";
+            values["HttpRequestTimeoutMilliseconds"] = "0";
+
+            var errors = CollectorSettings.Validate(values, out var settings);
+
+            Assert.Null(settings);
+            Assert.Equal(4, errors.Count);
+            Assert.Contains(errors, error => error.Contains("SERVER_BASE_URL"));
+            Assert.Contains(errors, error => error.Contains("COLLECTOR_API_KEY"));
+            Assert.Contains(errors, error => error.Contains("HeartbeatIntervalMilliseconds"));
+            Assert.Contains(errors, error => error.Contains("HttpRequestTimeoutMilliseconds"));
+            Assert.All(errors, error =>
+            {
+                Assert.DoesNotContain(shortKey, error);
+                Assert.DoesNotContain(invalidUrl, error);
+            });
+        }
+
+        private static Dictionary<string, string> ValidServerSettings()
+        {
+            return new Dictionary<string, string>
+            {
+                ["SERVER_BASE_URL"] = TestServerUrl,
+                ["COLLECTOR_API_KEY"] = TestApiKey
+            };
         }
     }
 }

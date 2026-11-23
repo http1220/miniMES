@@ -85,7 +85,7 @@ namespace Collector
                     await delay(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, cancellationToken);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Other exceptions propagate to the runtime for supervision.
             }
@@ -106,18 +106,13 @@ namespace Collector
             AlarmSubmissionLog.Write(log, equipment.Id, AlarmCause.Communication,
                 state.OnValidResponseAndSubmit(equipment.Id, receivedAt));
             if (temperature.Measurement.HasValue)
-                Submit(AlarmCause.Temperature, state.UpdateTemperature(equipment.Id, temperature.Measurement.Value,
-                    equipment.TemperatureUpperLimit), receivedAt);
+                AlarmSubmissionLog.Write(log, equipment.Id, AlarmCause.Temperature,
+                    state.UpdateTemperatureAndSubmit(equipment.Id, temperature.Measurement.Value,
+                        equipment.TemperatureUpperLimit, receivedAt));
             if (vibration.Measurement.HasValue)
-                Submit(AlarmCause.Vibration, state.UpdateVibration(equipment.Id, vibration.Measurement.Value,
-                    equipment.VibrationUpperLimit), receivedAt);
-        }
-
-        private void Submit(AlarmCause cause, AlarmEvent kind, TimeSpan receivedAt)
-        {
-            if (kind != AlarmEvent.None)
-                AlarmSubmissionLog.Write(log, equipment.Id, cause,
-                    state.SubmitAlarm(equipment.Id, cause, kind, receivedAt));
+                AlarmSubmissionLog.Write(log, equipment.Id, AlarmCause.Vibration,
+                    state.UpdateVibrationAndSubmit(equipment.Id, vibration.Measurement.Value,
+                        equipment.VibrationUpperLimit, receivedAt));
         }
 
         private static ushort ReadRegister(byte[] data, int register)

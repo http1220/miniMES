@@ -157,22 +157,24 @@ namespace UnitTests
                 test.State.OnValidResponse(1, -test.Settings.CommunicationFault);
                 Task judge = test.StartJudge();
                 await test.Advance(1);
-                var raised = Assert.Single(test.State.GetAlarmSnapshot());
+                var raised = Assert.Single(test.State.GetAlarmSnapshot().Where(item => item.Cause == AlarmCause.Communication));
 
                 var reader = new FakeModbusReader(test.Scheduler);
                 reader.Enqueue(() => reader.Success(), () => reader.Success(),
                     () => FakeModbusReader.Failure(ModbusFailureType.Timeout));
                 Task loop = test.StartEquipment(reader);
                 await test.Advance(4);
-                Assert.Single(test.State.GetAlarmSnapshot());
+                Assert.Single(test.State.GetAlarmSnapshot().Where(item => item.Cause == AlarmCause.Communication));
                 await test.Advance(1);
                 await test.Stop(loop, judge);
 
-                var cleared = test.State.GetAlarmSnapshot()[1];
-                Assert.Equal(AlarmEventType.Raised, raised.EventType);
-                Assert.Equal(AlarmCause.Communication, cleared.Cause);
-                Assert.Equal(AlarmEventType.Cleared, cleared.EventType);
-                Assert.Equal(raised.EventSequence + 1, cleared.EventSequence);
+                var communication = test.State.GetAlarmSnapshot()
+                    .Where(item => item.Cause == AlarmCause.Communication).ToArray();
+                Assert.Equal(new[] { AlarmEventType.ReportAbnormal, AlarmEventType.Cleared },
+                    communication.Select(item => item.EventType));
+                Assert.Same(raised, communication[0]);
+                var cleared = communication[1];
+                Assert.True(cleared.EventSequence > raised.EventSequence);
                 Assert.Equal(TimeSpan.FromSeconds(6), cleared.OccurredAt);
                 var clearLog = Assert.Single(test.ReadLogs().Where(row => (string)row["EventKind"] == "AlarmCleared"));
                 Assert.Equal("Communication", (string)clearLog["Detail"]);
@@ -193,20 +195,54 @@ namespace UnitTests
                     () => reader.Success(90), () => reader.Success(90),
                     () => reader.Success(80), () => reader.Success(201),
                     () => reader.Success(80), () => reader.Success(80));
+                AlarmEventItem[] TemperatureEvents() => test.State.GetAlarmSnapshot()
+                    .Where(item => item.Cause == AlarmCause.Temperature).ToArray();
+
                 Task loop = test.StartEquipment(reader);
                 await test.Advance(2);
-                Assert.Empty(test.State.GetAlarmSnapshot());
+                Assert.Empty(TemperatureEvents());
                 await test.Advance(1);
-                Assert.Equal(AlarmEventType.Raised, Assert.Single(test.State.GetAlarmSnapshot()).EventType);
+                Assert.Equal(AlarmEventType.ReportAbnormal, Assert.Single(TemperatureEvents()).EventType);
                 await test.Advance(3);
-                Assert.Single(test.State.GetAlarmSnapshot());
+                Assert.Single(TemperatureEvents());
                 await test.Advance(1);
                 await test.Stop(loop);
 
-                var events = test.State.GetAlarmSnapshot();
-                Assert.Equal(new[] { AlarmEventType.Raised, AlarmEventType.Cleared },
+                var events = TemperatureEvents();
+                Assert.Equal(new[] { AlarmEventType.ReportAbnormal, AlarmEventType.Cleared },
                     events.Select(item => item.EventType));
-                Assert.All(events, item => Assert.Equal(AlarmCause.Temperature, item.Cause));
+            }
+        }
+
+        [Fact]
+        public async Task RunAsync_FirstNormalTemperatureReport_SkipsNullMeasurements()
+        {
+            using (var test = new CollectorLoopTestContext(new Dictionary<string, string>
+            {
+                ["ThresholdConsecutiveCount"] = "3"
+            }))
+            {
+                var reader = new FakeModbusReader(test.Scheduler);
+                reader.Enqueue(() => reader.Success(80), () => reader.Success(201),
+                    () => reader.Success(80), () => reader.Success(80));
+                Task loop = test.StartEquipment(reader);
+
+                await test.Advance(2);
+                Assert.Null(test.State.GetSampleSnapshot()[1].Temperature);
+                Assert.DoesNotContain(test.State.GetAlarmSnapshot(), item => item.Cause == AlarmCause.Temperature);
+                await test.Advance(1);
+                var report = Assert.Single(test.State.GetAlarmSnapshot()
+                    .Where(item => item.Cause == AlarmCause.Temperature));
+                Assert.Equal(AlarmEventType.ReportNormal, report.EventType);
+                Assert.Equal(TimeSpan.FromSeconds(3), report.OccurredAt);
+                await test.Advance(1);
+                await test.Stop(loop);
+
+                Assert.Same(report, Assert.Single(test.State.GetAlarmSnapshot()
+                    .Where(item => item.Cause == AlarmCause.Temperature)));
+                var row = Assert.Single(test.ReadLogs().Where(entry => (string)entry["EventKind"] == "StatusReported" &&
+                    (string)entry["Detail"] == "Temperature"));
+                Assert.Equal(report.EventSequence, (long)row["Count"]);
             }
         }
 

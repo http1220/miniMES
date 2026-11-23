@@ -40,7 +40,8 @@ namespace IntegrationTests
                 }
 
                 var communication = state.GetAlarmSnapshot().Where(item => item.EventSequence > lastEvent &&
-                    item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.Raised).ToArray();
+                    item.Cause == AlarmCause.Communication &&
+                    (item.EventType == AlarmEventType.ReportAbnormal || item.EventType == AlarmEventType.Raised)).ToArray();
                 Assert.NotEmpty(communication);
                 Assert.All(communication, item => Assert.Equal(1, item.EquipmentId));
             });
@@ -92,7 +93,11 @@ namespace IntegrationTests
             var directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
             try
             {
-                var values = new Dictionary<string, string>();
+                var values = new Dictionary<string, string>
+                {
+                    ["SERVER_BASE_URL"] = "https://change-me:5443",
+                    ["COLLECTOR_API_KEY"] = "change-me-change-me-change-me-0001"
+                };
                 for (int i = 0; i < devices.Length; i++)
                 {
                     devices[i] = new FakeModbusDevice(i % 2 == 0 ? RegisterWordOrder.ABCD : RegisterWordOrder.CDAB);
