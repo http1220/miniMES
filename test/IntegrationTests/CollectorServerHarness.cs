@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +29,7 @@ namespace IntegrationTests
     {
         private const string CollectorKey = "fake-collector-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         private const string DashboardKey = "fake-dashboard-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        private const string ProxyDataSource = "tcp:[::1],21433";
         private const byte TemperatureCause = 2;
         private readonly string databaseName = "MiniMES_CollectorIt_" + Guid.NewGuid().ToString("N");
         private readonly string directory = Path.Combine(Path.GetTempPath(), "MiniMES_CollectorIt_" + Guid.NewGuid().ToString("N"));
@@ -39,6 +42,7 @@ namespace IntegrationTests
         private DatabaseMonitor databaseMonitor;
         private Serilog.Core.Logger serverLog;
         private IDisposable host;
+        private ServerSettings serverSettings;
 
         public Harness()
         {
@@ -76,6 +80,11 @@ namespace IntegrationTests
 
         public void StartServer(DelegatingHandler responseHandler = null)
         {
+            StartServer(databaseViaProxy: false, responseHandler: responseHandler);
+        }
+
+        public void StartServer(bool databaseViaProxy, DelegatingHandler responseHandler = null)
+        {
             var builder = new SqlConnectionStringBuilder(configured)
             {
                 InitialCatalog = "master", Pooling = false, ConnectTimeout = 5
@@ -91,14 +100,97 @@ namespace IntegrationTests
             connection = new SqlConnection(testConnection);
             connection.Open();
 
+            if (databaseViaProxy)
+                builder.DataSource = ProxyDataSource;
+
             var values = new Dictionary<string, string>
             {
                 ["SERVER_URL"] = "https://+:5443/",
-                ["DB_CONNECTION_STRING"] = testConnection,
+                ["DB_CONNECTION_STRING"] = builder.ConnectionString,
                 ["COLLECTOR_API_KEY"] = CollectorKey,
                 ["DASHBOARD_API_KEY"] = DashboardKey
             };
-            Assert.Empty(ServerSettings.Validate(values, out var settings));
+            Assert.Empty(ServerSettings.Validate(values, out serverSettings));
+            StartServerHost(responseHandler);
+        }
+
+        public void StopServer()
+        {
+            try
+            {
+                host?.Dispose();
+            }
+            finally
+            {
+                host = null;
+                try
+                {
+                    databaseMonitor?.Dispose();
+                }
+                finally
+                {
+                    databaseMonitor = null;
+                    serverLog?.Dispose();
+                    serverLog = null;
+                }
+            }
+        }
+
+        public async Task RestartServer(CancellationToken token = default(CancellationToken))
+        {
+            if (serverSettings == null || host != null)
+                throw new InvalidOperationException("Restart requires an initialized, stopped server.");
+
+            var elapsed = Stopwatch.StartNew();
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                try
+                {
+                    StartServerHost(null);
+                    return;
+                }
+                catch (Exception exception) when (exception.GetBaseException() is HttpListenerException listener &&
+                    listener.NativeErrorCode == 183 && elapsed.Elapsed < TimeSpan.FromMilliseconds(4800))
+                {
+                    await Task.Delay(200, token);
+                }
+            }
+        }
+
+        public async Task<JObject> ReadStatus(CancellationToken token)
+        {
+            using (var client = new HttpClient(new HttpClientHandler { UseProxy = false })
+                { Timeout = TimeSpan.FromSeconds(3) })
+            using (var request = new HttpRequestMessage(HttpMethod.Get, "https://localhost:5443/api/v1/status"))
+            {
+                request.Headers.Add("X-Api-Key", DashboardKey);
+                using (var response = await client.SendAsync(request, token))
+                {
+                    Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                    string body = await response.Content.ReadAsStringAsync();
+                    AssertNoKeys(body);
+                    return JObject.Parse(body);
+                }
+            }
+        }
+
+        private void StartServerHost(DelegatingHandler responseHandler)
+        {
+            var settings = serverSettings;
+            try
+            {
+                StartServerHostCore(settings, responseHandler);
+            }
+            catch
+            {
+                StopServer();
+                throw;
+            }
+        }
+
+        private void StartServerHostCore(ServerSettings settings, DelegatingHandler responseHandler)
+        {
             serverLog = new LoggerConfiguration()
                 .WriteTo.File(new CompactJsonFormatter(), Path.Combine(directory, "server.log")).CreateLogger();
             var probe = new DatabaseProbe(settings.ConnectionString, settings.ProbeTimeoutSeconds);
@@ -196,12 +288,10 @@ SELECT EventSequence FROM dbo.ALARM_EVENT WHERE RunId = @runId ORDER BY EventSeq
             {
                 try
                 {
-                    host?.Dispose();
+                    StopServer();
                 }
                 finally
                 {
-                    databaseMonitor?.Dispose();
-                    serverLog?.Dispose();
                     connection?.Dispose();
                 }
 
