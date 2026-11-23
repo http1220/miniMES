@@ -82,7 +82,7 @@ namespace Collector
                         log.Write(LogEventLevel.Information, CollectorEventKind.ReceiveDelay, count: milliseconds);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Other exceptions propagate to the runtime for supervision.
             }

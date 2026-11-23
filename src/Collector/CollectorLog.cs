@@ -14,7 +14,8 @@ namespace Collector
         AlarmQueueRejected, AlarmUnsentHeld, AlarmUnsentCancelled, AlarmUnsentRequeued,
         AlarmRaised, AlarmCleared, StatusReported, ReceiveDelay, ExceptionObserved,
         PollRecovered, StatusSnapshot,
-        TransmitFailed, TransmitRecovered, BatchDiscarded, ClockJump, HeartbeatFailed, HeartbeatRecovered
+        TransmitFailed, TransmitRecovered, BatchDiscarded, ClockJump, HeartbeatFailed, HeartbeatRecovered,
+        LoopFatal, ShutdownRequested, ShutdownCompleted, ShutdownIncomplete
     }
 
     public sealed class CollectorLog : IDisposable

@@ -85,7 +85,7 @@ namespace Collector
                     await delay(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, cancellationToken);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 // Other exceptions propagate to the runtime for supervision.
             }
