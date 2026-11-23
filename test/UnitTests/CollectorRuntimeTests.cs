@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Collector;
 using Core;
@@ -10,6 +11,81 @@ namespace UnitTests
 {
     public class CollectorRuntimeTests
     {
+        [Fact]
+        public async Task RunAsync_BlockedTransmission_DoesNotStopHeartbeatJudgmentOrPolling()
+        {
+            using (var test = new CollectorLoopTestContext())
+            using (var cancellation = new CancellationTokenSource())
+            {
+                var timeline = new TransmissionTimeline(test.Settings.ClockJumpThreshold);
+                var client = new FakeServerClient(test.Scheduler);
+                var alarmResponse = new TaskCompletionSource<ServerResult>();
+                var sampleResponse = new TaskCompletionSource<ServerResult>();
+                client.Respond = (call, ct) =>
+                {
+                    switch (call.Kind)
+                    {
+                        case "Alarm": return alarmResponse.Task;
+                        case "Sample": return sampleResponse.Task;
+                        default: return Task.FromResult(client.Success());
+                    }
+                };
+
+                var initialAlarm = test.State.SubmitStatusReport(2, AlarmCause.Temperature, true, TimeSpan.Zero).Item;
+                var readers = new Dictionary<int, FakeModbusReader>();
+                var runtime = new CollectorRuntime(test.Settings, test.State, test.Log, device =>
+                {
+                    var reader = new FakeModbusReader(test.Scheduler);
+                    reader.Fallback = (timeout, ct) => Task.FromResult(device.Id == 1 && test.Scheduler.Now > TimeSpan.Zero
+                        ? FakeModbusReader.Failure(ModbusFailureType.Timeout)
+                        : reader.Success(order: device.WordOrder));
+                    readers.Add(device.Id, reader);
+                    return reader;
+                }, test.Scheduler.NowProvider, test.Scheduler.DelayProvider, id => () => 0, client, timeline);
+
+                Task run = test.Scheduler.RunAsync(() => runtime.RunAsync(cancellation.Token));
+                Assert.Equal("Heartbeat", Assert.Single(client.Calls).Kind);
+                Assert.True(timeline.HasReference);
+
+                for (int second = 1; second <= 15; second++)
+                {
+                    await test.Advance(1);
+                    Assert.Equal(second / 2 + 1, client.Calls.Count(call => call.Kind == "Heartbeat"));
+                    Assert.All(readers.Values, reader => Assert.Equal(second + 1, reader.Calls.Count));
+
+                    if (second == 7)
+                    {
+                        var alarmCall = Assert.Single(client.Calls, call => call.Kind == "Alarm");
+                        Assert.Same(initialAlarm, Assert.Single(alarmCall.Alarms).Item);
+                        Assert.DoesNotContain(client.Calls, call => call.Kind == "Sample");
+                        Assert.Contains(test.State.GetAlarmSnapshot(), item => item.EquipmentId == 1 &&
+                            item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.ReportAbnormal);
+                        alarmResponse.SetResult(client.Success());
+                        await test.Advance(0);
+                        Assert.Single(client.Calls, call => call.Kind == "Sample");
+                    }
+                }
+
+                var sampleCall = Assert.Single(client.Calls, call => call.Kind == "Sample");
+                var buffered = test.State.GetSampleSnapshot();
+                Assert.All(sampleCall.Samples, sample => Assert.Contains(sample.Item, buffered));
+                var queued = test.State.GetAlarmSnapshot();
+                Assert.DoesNotContain(initialAlarm, queued);
+                Assert.Contains(queued, item => item.EquipmentId == 1 &&
+                    item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.ReportAbnormal);
+                sampleResponse.SetResult(client.Success());
+                await test.Advance(0);
+                var remaining = test.State.GetSampleSnapshot();
+                Assert.All(sampleCall.Samples, sample => Assert.DoesNotContain(sample.Item, remaining));
+                Assert.False(run.IsCompleted);
+
+                cancellation.Cancel();
+                await test.Advance(0);
+                await run;
+                Assert.Equal(TaskStatus.RanToCompletion, run.Status);
+            }
+        }
+
         [Fact]
         public async Task RunAsync_Cancellation_CompletesAfterAllLoopsStart()
         {

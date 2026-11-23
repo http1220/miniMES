@@ -13,6 +13,8 @@ namespace Collector
         private readonly Func<TimeSpan> now;
         private readonly Func<TimeSpan, CancellationToken, Task> delay;
         private readonly Func<int, Func<double>> randomFactory;
+        private readonly IServerClient serverClient;
+        private readonly TransmissionTimeline timeline;
 
         public CollectorRuntime(CollectorSettings settings, CollectorState state, CollectorLog log,
             Func<EquipmentSettings, IModbusReader> readerFactory, Func<TimeSpan> now,
@@ -27,6 +29,16 @@ namespace Collector
             this.randomFactory = randomFactory;
         }
 
+        public CollectorRuntime(CollectorSettings settings, CollectorState state, CollectorLog log,
+            Func<EquipmentSettings, IModbusReader> readerFactory, Func<TimeSpan> now,
+            Func<TimeSpan, CancellationToken, Task> delay, Func<int, Func<double>> randomFactory,
+            IServerClient serverClient, TransmissionTimeline timeline)
+            : this(settings, state, log, readerFactory, now, delay, randomFactory)
+        {
+            this.serverClient = serverClient;
+            this.timeline = timeline;
+        }
+
         public Task RunAsync(CancellationToken cancellationToken)
         {
             var tracker = new ReceiveDelayTracker();
@@ -39,11 +51,20 @@ namespace Collector
                     delay, log, randomFactory(device.Id), tracker);
             }
 
-            var tasks = new Task[loops.Length + 1];
+            bool runServerLoops = serverClient != null && timeline != null;
+            var tasks = new Task[loops.Length + (runServerLoops ? 3 : 1)];
             for (int i = 0; i < loops.Length; i++)
                 tasks[i] = loops[i].RunAsync(cancellationToken);
             tasks[loops.Length] = new JudgeLoop(settings, state, now, delay, log, tracker)
                 .RunAsync(cancellationToken);
+
+            if (runServerLoops)
+            {
+                tasks[loops.Length + 1] = new TransmitLoop(settings, state, timeline, serverClient, now,
+                    delay, log, randomFactory(0)).RunAsync(cancellationToken);
+                tasks[loops.Length + 2] = new HeartbeatLoop(settings, state, timeline, serverClient, now,
+                    delay, log).RunAsync(cancellationToken);
+            }
 
             // A future supervisor will cancel sibling loops when one faults.
             return Task.WhenAll(tasks);

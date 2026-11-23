@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using Core;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
@@ -12,7 +13,8 @@ namespace Collector
         Started, ConfigurationInvalid, PollFailed, SampleStored, SampleBufferDropped,
         AlarmQueueRejected, AlarmUnsentHeld, AlarmUnsentCancelled, AlarmUnsentRequeued,
         AlarmRaised, AlarmCleared, StatusReported, ReceiveDelay, ExceptionObserved,
-        PollRecovered, StatusSnapshot
+        PollRecovered, StatusSnapshot,
+        TransmitFailed, TransmitRecovered, BatchDiscarded, ClockJump, HeartbeatFailed, HeartbeatRecovered
     }
 
     public sealed class CollectorLog : IDisposable
@@ -34,6 +36,14 @@ namespace Collector
             logger.Write(level,
                 "{EventKind} equipment={EquipmentId} run={RunId} failure={FailureType} exception={ExceptionType} count={Count} detail={Detail}",
                 kind.ToString(), equipmentId, runId, failureType, exception?.GetType().FullName, count, detail);
+        }
+
+        internal static void WriteClockJump(CollectorLog log, ClockJump jump)
+        {
+            if (jump != null)
+                log.Write(LogEventLevel.Warning, CollectorEventKind.ClockJump,
+                    count: (long)jump.Delta.TotalMilliseconds,
+                    detail: jump.Delta > TimeSpan.Zero ? "Forward" : "Backward");
         }
 
         public void Dispose()
