@@ -77,6 +77,8 @@ namespace UnitTests
         {
             var state = CreateState(alarmCapacity: 1);
             var first = state.SubmitStatusReport(2, AlarmCause.Communication, false, TimeSpan.Zero);
+            var report = state.SubmitStatusReport(1, AlarmCause.Temperature, false, TimeSpan.Zero);
+            Assert.Equal(SubmitOutcome.HeldUnsent, report.Outcome);
             var raised = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Raised, TimeSpan.Zero);
             var cleared = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Cleared, TimeSpan.Zero);
             var ignored = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.None, TimeSpan.Zero);
@@ -85,40 +87,47 @@ namespace UnitTests
             Assert.Null(cleared.Item);
             Assert.Equal(SubmitOutcome.Ignored, ignored.Outcome);
             Assert.Null(ignored.Item);
-            Assert.Equal(0, state.UnsentAlarmCount);
+            Assert.Same(report.Item, Assert.Single(state.GetUnsentSnapshot()));
             Assert.Equal(0, state.RequeueUnsent());
             state.RemoveAlarmEvents(new HashSet<long> { first.Item.EventSequence });
-            var next = state.SubmitStatusReport(1, AlarmCause.Temperature, false, TimeSpan.Zero);
+            Assert.Equal(1, state.RequeueUnsent());
+            var next = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Raised, TimeSpan.Zero);
             Assert.Equal(raised.Item.EventSequence + 1, next.Item.EventSequence);
         }
 
         [Theory]
         [InlineData(true)]
         [InlineData(false)]
-        public void SubmitStatusReport_EarlierSameKeyIsUnsent_PreservesOrderAndAllowsOtherKey(bool abnormal)
+        public void SubmitAlarm_EarlierSameKeyReportIsUnsent_PreservesOrderAndAllowsOtherKey(bool abnormal)
         {
             var state = CreateState(alarmCapacity: 3);
             var fill = Enumerable.Range(0, 3)
-                .Select(_ => state.SubmitStatusReport(2, AlarmCause.Communication, false, TimeSpan.Zero).Item.EventSequence)
+                .Select(_ => state.SubmitAlarm(2, AlarmCause.Communication, AlarmEvent.Raised, TimeSpan.Zero).Item.EventSequence)
                 .ToArray();
 
-            var raised = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Raised, TimeSpan.Zero);
-            state.RemoveAlarmEvents(new HashSet<long>(fill));
             var report = state.SubmitStatusReport(1, AlarmCause.Temperature, abnormal, TimeSpan.Zero);
-            var cleared = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Cleared, TimeSpan.Zero);
-            Assert.Equal(SubmitOutcome.HeldUnsent, raised.Outcome);
             Assert.Equal(SubmitOutcome.HeldUnsent, report.Outcome);
-            Assert.Equal(SubmitOutcome.HeldUnsent, cleared.Outcome);
-            Assert.Equal(3, state.UnsentAlarmCount);
+            Assert.Equal(abnormal ? AlarmEventType.ReportAbnormal : AlarmEventType.ReportNormal, report.Item.EventType);
+            state.RemoveAlarmEvents(new HashSet<long>(fill));
+
+            var expected = new List<AlarmEventItem> { report.Item };
+            if (abnormal)
+            {
+                var clear = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Cleared, TimeSpan.Zero);
+                Assert.Equal(SubmitOutcome.HeldUnsent, clear.Outcome);
+                expected.Add(clear.Item);
+            }
+            var raised = state.SubmitAlarm(1, AlarmCause.Temperature, AlarmEvent.Raised, TimeSpan.Zero);
+            Assert.Equal(SubmitOutcome.HeldUnsent, raised.Outcome);
+            expected.Add(raised.Item);
             Assert.Empty(state.GetAlarmSnapshot());
             Assert.Equal(1L, state.AlarmsRejected);
 
             var other = state.SubmitStatusReport(1, AlarmCause.Vibration, false, TimeSpan.Zero);
             Assert.Equal(SubmitOutcome.Queued, other.Outcome);
             state.RemoveAlarmEvents(new HashSet<long> { other.Item.EventSequence });
-            Assert.Equal(3, state.RequeueUnsent());
-            Assert.Equal(new[] { raised.Item, report.Item, cleared.Item }, state.GetAlarmSnapshot());
-            Assert.Equal(abnormal ? AlarmEventType.ReportAbnormal : AlarmEventType.ReportNormal, report.Item.EventType);
+            Assert.Equal(expected.Count, state.RequeueUnsent());
+            Assert.Equal(expected, state.GetAlarmSnapshot());
         }
 
         [Fact]
@@ -174,7 +183,7 @@ namespace UnitTests
             {
                 var id = 1 + i % 2;
                 state.AddSample(id, TimeSpan.Zero, null, null, null);
-                state.SubmitStatusReport(id, AlarmCause.Temperature, true, TimeSpan.Zero);
+                state.SubmitAlarm(id, AlarmCause.Temperature, AlarmEvent.Raised, TimeSpan.Zero);
             });
 
             var samples = state.GetSampleSnapshot();
@@ -182,6 +191,7 @@ namespace UnitTests
             foreach (var id in new[] { 1, 2 })
                 Assert.Equal(Enumerable.Range(1, count / 2).Select(i => (long)i),
                     samples.Where(item => item.EquipmentId == id).Select(item => item.SequenceNumber));
+            Assert.Equal(2, state.GetAlarmSnapshot().Count(item => item.EventType == AlarmEventType.ReportAbnormal));
             Assert.Equal(Enumerable.Range(1, count).Select(i => (long)i),
                 state.GetAlarmSnapshot().Select(item => item.EventSequence));
         }
@@ -207,12 +217,14 @@ namespace UnitTests
 
             var types = state.GetAlarmSnapshot().Select(item => item.EventType).ToArray();
             Assert.NotEmpty(types);
-            for (var i = 0; i < types.Length; i++)
-                Assert.Equal(i % 2 == 0 ? AlarmEventType.Raised : AlarmEventType.Cleared, types[i]);
+            Assert.Equal(AlarmEventType.ReportNormal, types[0]);
+            Assert.True(types.Length > 1);
+            for (var i = 1; i < types.Length; i++)
+                Assert.Equal(i % 2 == 1 ? AlarmEventType.Raised : AlarmEventType.Cleared, types[i]);
         }
 
         [Fact]
-        public void CheckCommunicationTimeoutAndSubmit_ThenRecovery_QueuesRaisedThenCleared()
+        public void CheckCommunicationTimeoutAndSubmit_ThenRecovery_QueuesAbnormalReportThenCleared()
         {
             var state = CreateState();
             var timeout = TimeSpan.FromSeconds(5);
@@ -220,7 +232,7 @@ namespace UnitTests
 
             var raised = state.CheckCommunicationTimeoutAndSubmit(1, timeout, timeout);
             Assert.Equal(SubmitOutcome.Queued, raised.Outcome);
-            Assert.Equal(AlarmEventType.Raised, raised.Item.EventType);
+            Assert.Equal(AlarmEventType.ReportAbnormal, raised.Item.EventType);
             Assert.Equal(SubmitOutcome.Ignored, state.CheckCommunicationTimeoutAndSubmit(1, timeout, timeout).Outcome);
             Assert.Equal(SubmitOutcome.Ignored, state.OnValidResponseAndSubmit(1, timeout).Outcome);
             var cleared = state.OnValidResponseAndSubmit(1, timeout);

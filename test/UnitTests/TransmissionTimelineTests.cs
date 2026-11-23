@@ -194,7 +194,7 @@ namespace UnitTests
             AddAlarm(state, 1, 1);
             var secondKey = AddAlarm(state, 2, 2).Item;
             var firstKeyStart = AddAlarm(state, 1, 3).Item;
-            var firstKeyEnd = state.SubmitStatusReport(1, AlarmCause.Temperature, true, Seconds(4)).Item;
+            var firstKeyEnd = AddAlarm(state, 1, 4).Item;
 
             var snapshot = state.GetUnsentSnapshot();
             Assert.Equal(new[] { firstKeyStart, firstKeyEnd, secondKey }, snapshot);

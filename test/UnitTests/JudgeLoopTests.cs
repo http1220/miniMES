@@ -11,7 +11,7 @@ namespace UnitTests
     public class JudgeLoopTests
     {
         [Fact]
-        public async Task RunAsync_CommunicationTimeout_RaisesOnceForEquipmentWithHistory()
+        public async Task RunAsync_CommunicationTimeout_ReportsAbnormalOnceForEquipmentWithHistory()
         {
             using (var test = new CollectorLoopTestContext(new Dictionary<string, string>
             {
@@ -28,13 +28,13 @@ namespace UnitTests
                 var raised = Assert.Single(test.State.GetAlarmSnapshot());
                 Assert.Equal(1, raised.EquipmentId);
                 Assert.Equal(AlarmCause.Communication, raised.Cause);
-                Assert.Equal(AlarmEventType.Raised, raised.EventType);
+                Assert.Equal(AlarmEventType.ReportAbnormal, raised.EventType);
                 Assert.Equal(TimeSpan.FromSeconds(3), raised.OccurredAt);
                 await test.Advance(2);
                 await test.Stop(loop);
 
                 Assert.Same(raised, Assert.Single(test.State.GetAlarmSnapshot()));
-                var row = Assert.Single(test.ReadLogs().Where(entry => (string)entry["EventKind"] == "AlarmRaised"));
+                var row = Assert.Single(test.ReadLogs().Where(entry => (string)entry["EventKind"] == "StatusReported"));
                 Assert.Equal("Communication", (string)row["Detail"]);
                 Assert.Equal(raised.EventSequence, (long)row["Count"]);
             }

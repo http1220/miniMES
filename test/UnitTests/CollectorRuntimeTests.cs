@@ -66,7 +66,7 @@ namespace UnitTests
                     Assert.True(test.State.LastSampleSequence(id) - baseline[id - 1] >= 57);
 
                 var raised = Assert.Single(test.State.GetAlarmSnapshot().Where(item =>
-                    item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.Raised));
+                    item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.ReportAbnormal));
                 Assert.Equal(1, raised.EquipmentId);
             }
         }

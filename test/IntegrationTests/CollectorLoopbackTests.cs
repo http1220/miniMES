@@ -40,7 +40,8 @@ namespace IntegrationTests
                 }
 
                 var communication = state.GetAlarmSnapshot().Where(item => item.EventSequence > lastEvent &&
-                    item.Cause == AlarmCause.Communication && item.EventType == AlarmEventType.Raised).ToArray();
+                    item.Cause == AlarmCause.Communication &&
+                    (item.EventType == AlarmEventType.ReportAbnormal || item.EventType == AlarmEventType.Raised)).ToArray();
                 Assert.NotEmpty(communication);
                 Assert.All(communication, item => Assert.Equal(1, item.EquipmentId));
             });

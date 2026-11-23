@@ -22,6 +22,12 @@ namespace Core
             this.recoverySuccessCount = recoverySuccessCount;
         }
 
+        public CommunicationAlarmDetector(int recoverySuccessCount, TimeSpan startTime)
+            : this(recoverySuccessCount)
+        {
+            lastValidResponseTime = startTime;
+        }
+
         public AlarmEvent OnValidResponse(TimeSpan now)
         {
             lastValidResponseTime = now;
