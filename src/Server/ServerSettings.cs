@@ -14,6 +14,7 @@ namespace Server
         public int ProbeTimeoutSeconds { get; private set; }
         public int ProbeIntervalSeconds { get; private set; }
         public int CollectorStoppedSeconds { get; private set; }
+        public int GapThresholdSeconds { get; private set; }
         public string LogDirectory { get; private set; }
 
         public static IDictionary<string, string> ParseEnv(IEnumerable<string> lines)
@@ -66,6 +67,7 @@ namespace Server
             settings.ProbeTimeoutSeconds = Positive(values, "DB_PROBE_TIMEOUT_SECONDS", 2, errors);
             settings.ProbeIntervalSeconds = Positive(values, "DB_PROBE_INTERVAL_SECONDS", 2, errors);
             settings.CollectorStoppedSeconds = Positive(values, "COLLECTOR_STOPPED_SECONDS", 10, errors);
+            settings.GapThresholdSeconds = Positive(values, "GAP_THRESHOLD_SECONDS", 5, errors);
             return errors;
         }
 
