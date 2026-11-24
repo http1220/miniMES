@@ -66,6 +66,47 @@ namespace UnitTests
         }
 
         [Fact]
+        public void MissingGapThreshold_DefaultsToFiveSeconds()
+        {
+            ServerSettings settings;
+            Assert.Empty(ServerSettings.Validate(Values(Connection), out settings));
+            Assert.Equal(5, settings.GapThresholdSeconds);
+        }
+
+        [Fact]
+        public void PositiveGapThreshold_UsesConfiguredValue()
+        {
+            var values = Values(Connection);
+            values["GAP_THRESHOLD_SECONDS"] = "12";
+            ServerSettings settings;
+            Assert.Empty(ServerSettings.Validate(values, out settings));
+            Assert.Equal(12, settings.GapThresholdSeconds);
+        }
+
+        [Theory]
+        [InlineData("0")]
+        [InlineData("-1")]
+        [InlineData("invalid")]
+        public void InvalidGapThreshold_ReturnsPositiveIntegerError(string value)
+        {
+            var values = Values(Connection);
+            values["GAP_THRESHOLD_SECONDS"] = value;
+            ServerSettings settings;
+            var errors = ServerSettings.Validate(values, out settings);
+            Assert.Equal("GAP_THRESHOLD_SECONDS must be an integer greater than zero.", Assert.Single(errors));
+        }
+
+        [Fact]
+        public void MigrationOnly_IgnoresGapThreshold()
+        {
+            var values = Values(Connection);
+            values["GAP_THRESHOLD_SECONDS"] = "invalid";
+            ServerSettings settings;
+            Assert.Empty(ServerSettings.Validate(values, out settings, migrationOnly: true));
+            Assert.Equal(0, settings.GapThresholdSeconds);
+        }
+
+        [Fact]
         public void InvalidConnection_ReturnsExistingError()
         {
             ServerSettings settings;
